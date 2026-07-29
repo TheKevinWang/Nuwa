@@ -1,0 +1,1 @@
+"""Nuwa payload type package."""

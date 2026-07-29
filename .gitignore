@@ -1,0 +1,34 @@
+# Local instructions and AI/development metadata
+AGENTS.md
+**/AGENTS.md
+.codex/
+
+# Credentials and private keys
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+*.pem
+id_dsa
+id_ed25519
+id_rsa
+
+# Python and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+.venv-*/
+
+# Nuwa private quality-gate output
+.gate-evidence/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
