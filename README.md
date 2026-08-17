@@ -507,6 +507,13 @@ command subset when CLM compatibility is required.
   plaintext builds. In a protected build, debug logging does not log plaintext
   or protected message bodies, HMAC values, or keys. Treat all debug payload
   output as sensitive.
+- Nuwa's `debug_logging` controls only agent-side output; Mythic server-side
+  logging is separate. On Mythic builds without key-material redaction, keep
+  the global `mythic_debug_agent_message` / `debug_agent_message` setting false
+  when using protected profiles. Older server debug and staging-error paths may
+  serialize request fields or key-bearing records. This release was validated
+  with equivalent Mythic core redaction; apply that hardening before enabling
+  server-side logging in another deployment.
 - `shell` deliberately evaluates operator-supplied PowerShell. Nuwa does not
   add a sandbox beyond the token, language mode, application-control policy,
   and privileges of the hosting process.
