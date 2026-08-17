@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import copy
 import json
+import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -70,12 +73,33 @@ except ImportError:  # pragma: no cover - unit test fallback
         author: str = ""
         semver: str = ""
 
-from .codec_registry import get_codec
+from .codec_registry import get_codec, list_codecs
+from .protection import (
+    AUTHENTICATION_ERROR,
+    HISTORICAL_AES256_HMAC,
+    KEY_SIZE,
+    PROTECTED_PROFILES,
+    PROTECTION_NONE,
+    ProtectionAuthenticationError,
+    ProtectionConfigurationError,
+    ProtectionSelection,
+    protect_message,
+    resolve_crypto_selection,
+    unprotect_message,
+)
 
 
-WIRE_VERSION_MARKER = "NW1"
 DEFAULT_CODEC_PROFILE = "decimal"
 DEFAULT_CODEC_VERSION = "1"
+NUWA_BINARY_FORMAT_FIELD = "nuwa_binary_format"
+NUWA_BYTE_ARRAY_FORMAT = "byte_array"
+
+
+@dataclass(frozen=True)
+class DecodedWireMessage:
+    codec_profile: str
+    message_bytes: bytes
+    message: dict[str, Any]
 
 
 def start() -> None:
@@ -99,42 +123,135 @@ def normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
     return normalized
 
 
-def build_marker(codec_profile: str) -> bytes:
-    return f"{WIRE_VERSION_MARKER}:{codec_profile}:".encode("ascii")
-
-
 def encode_wire_message(message_bytes: bytes, context: dict[str, Any] | None = None) -> bytes:
     normalized = normalize_context(context)
     codec = get_codec(normalized["codec_profile"])
-    inner = codec.encode_inner(bytes(message_bytes), normalized)
-    return build_marker(normalized["codec_profile"]) + inner
+    return codec.encode_inner(bytes(message_bytes), normalized)
 
 
-def decode_wire_message(wire_bytes: bytes, context: dict[str, Any] | None = None) -> bytes:
-    normalized = normalize_context(context)
-    codec_profile, body_offset = parse_marker(bytes(wire_bytes), normalized)
-    codec = get_codec(codec_profile)
-    return codec.decode_inner(bytes(wire_bytes[body_offset:]), normalized)
+def probe_wire_message(
+    wire_bytes: bytes,
+    context: dict[str, Any] | None = None,
+    protection: ProtectionSelection | None = None,
+) -> DecodedWireMessage:
+    candidates: list[DecodedWireMessage] = []
+    payload = bytes(wire_bytes)
+    selected = protection or ProtectionSelection()
+    authentication_failed = False
 
+    for codec_profile in list_codecs():
+        attempt_context = normalize_context(context)
+        attempt_context["codec_profile"] = codec_profile
+        try:
+            message_bytes = get_codec(codec_profile).decode_inner(
+                payload,
+                attempt_context,
+            )
+            message_bytes = unprotect_message(
+                selected.profile,
+                selected.key,
+                message_bytes,
+            )
+            message_text = message_bytes.decode("utf-8", errors="strict")
+            message = json.loads(message_text)
+            if not isinstance(message, dict):
+                continue
+        except ProtectionAuthenticationError:
+            authentication_failed = True
+            continue
+        except Exception:
+            continue
 
-def parse_marker(wire_bytes: bytes, context: dict[str, Any]) -> tuple[str, int]:
-    if not wire_bytes.startswith(f"{WIRE_VERSION_MARKER}:".encode("ascii")):
-        raise ValueError("Malformed Nuwa wire marker")
-
-    marker_tail_start = len(WIRE_VERSION_MARKER) + 1
-    marker_tail = wire_bytes[marker_tail_start:]
-    profile_terminator = marker_tail.find(b":")
-    if profile_terminator <= 0:
-        raise ValueError("Malformed Nuwa wire marker")
-
-    codec_profile = marker_tail[:profile_terminator].decode("ascii")
-    expected_profile = context["codec_profile"]
-    if codec_profile != expected_profile:
-        raise ValueError(
-            f"Codec profile mismatch: marker '{codec_profile}' != context '{expected_profile}'"
+        candidates.append(
+            DecodedWireMessage(
+                codec_profile=codec_profile,
+                message_bytes=message_bytes,
+                message=message,
+            )
         )
 
-    return codec_profile, marker_tail_start + profile_terminator + 1
+    if not candidates:
+        if authentication_failed:
+            raise ProtectionAuthenticationError(AUTHENTICATION_ERROR)
+        raise ValueError("No Nuwa codec accepted the wire payload")
+    if len(candidates) > 1:
+        matching_profiles = ", ".join(
+            candidate.codec_profile for candidate in candidates
+        )
+        raise ValueError(f"Ambiguous Nuwa wire payload: {matching_profiles}")
+    return candidates[0]
+
+
+def decode_wire_message(
+    wire_bytes: bytes,
+    context: dict[str, Any] | None = None,
+) -> bytes:
+    return probe_wire_message(wire_bytes, context).message_bytes
+
+
+def _uses_byte_array_chunks(message: dict[str, Any]) -> bool:
+    return message.get(NUWA_BINARY_FORMAT_FIELD) == NUWA_BYTE_ARRAY_FORMAT
+
+
+def _normalize_inbound_file_chunks(message: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(message)
+    if not _uses_byte_array_chunks(normalized):
+        return normalized
+
+    responses = normalized.get("responses")
+    if responses is None:
+        return normalized
+    if not isinstance(responses, list):
+        raise ValueError("responses must be an array when using byte-array chunks")
+
+    for response_index, response in enumerate(responses):
+        if not isinstance(response, dict):
+            continue
+        download = response.get("download")
+        if not isinstance(download, dict) or "chunk_data" not in download:
+            continue
+        location = f"responses[{response_index}].download.chunk_data"
+        chunk_data = download["chunk_data"]
+        if not isinstance(chunk_data, list):
+            raise ValueError(f"{location} must be an array of integers")
+        for item_index, item in enumerate(chunk_data):
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ValueError(
+                    f"{location}[{item_index}] must be an integer from 0 through 255"
+                )
+            if item < 0 or item > 255:
+                raise ValueError(
+                    f"{location}[{item_index}] must be an integer from 0 through 255"
+                )
+        download["chunk_data"] = base64.b64encode(bytes(chunk_data)).decode("ascii")
+    return normalized
+
+
+def _normalize_outbound_file_chunks(message: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(message)
+    if not _uses_byte_array_chunks(normalized):
+        return normalized
+
+    normalized.pop(NUWA_BINARY_FORMAT_FIELD, None)
+    responses = normalized.get("responses")
+    if responses is None:
+        return normalized
+    if not isinstance(responses, list):
+        raise ValueError("responses must be an array when using byte-array chunks")
+
+    for response_index, response in enumerate(responses):
+        if not isinstance(response, dict) or "chunk_data" not in response:
+            continue
+        location = f"responses[{response_index}].chunk_data"
+        chunk_data = response["chunk_data"]
+        if not isinstance(chunk_data, str):
+            raise ValueError(f"{location} must be a Base64 string")
+        try:
+            decoded = base64.b64decode(chunk_data, validate=True)
+        except Exception as exc:
+            raise ValueError(f"{location} is not valid Base64 data") from exc
+        response["chunk_data"] = list(decoded)
+    return normalized
 
 
 def _resolve_codec_profile(message: dict[str, Any] | None) -> str:
@@ -182,31 +299,59 @@ class NuwaTranslationContainer(TranslationContainer):
     name = "nuwa_translation"
     description = "Nuwa translation container for custom codec-based HTTP wire messages."
     author = "@openai"
-    semver = "1.0.0"
+    semver = "1.1.0"
 
     async def generate_keys(
         self, inputMsg: TrGenerateEncryptionKeysMessage
     ) -> TrGenerateEncryptionKeysMessageResponse:
-        return TrGenerateEncryptionKeysMessageResponse(Success=True)
+        try:
+            value = str(inputMsg.CryptoParamValue).strip()
+            if value in {PROTECTION_NONE, HISTORICAL_AES256_HMAC}:
+                return TrGenerateEncryptionKeysMessageResponse(Success=True)
+            if value not in PROTECTED_PROFILES:
+                raise ProtectionConfigurationError(
+                    f"Unsupported Nuwa protection profile: {value}"
+                )
+            key = secrets.token_bytes(KEY_SIZE)
+            return TrGenerateEncryptionKeysMessageResponse(
+                Success=True,
+                EncryptionKey=key,
+                DecryptionKey=key,
+            )
+        except Exception as exc:
+            return TrGenerateEncryptionKeysMessageResponse(
+                Success=False,
+                Error=str(exc),
+            )
 
     async def translate_to_c2_format(
         self, inputMsg: TrMythicC2ToCustomMessageFormatMessage
     ) -> TrMythicC2ToCustomMessageFormatMessageResponse:
         try:
+            protection = resolve_crypto_selection(
+                inputMsg.CryptoKeys,
+                direction="outbound",
+            )
+            normalized_message = _normalize_outbound_file_chunks(inputMsg.Message)
             context = _build_context(
                 direction="outbound",
                 c2_name=inputMsg.C2Name,
                 uuid=inputMsg.UUID,
-                message=inputMsg.Message,
+                message=normalized_message,
             )
             message_bytes = json.dumps(
-                inputMsg.Message,
+                normalized_message,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
+            protected_bytes = protect_message(
+                protection.profile,
+                protection.key,
+                message_bytes,
+            )
             return TrMythicC2ToCustomMessageFormatMessageResponse(
                 Success=True,
-                Message=encode_wire_message(message_bytes, context),
+                Message=encode_wire_message(protected_bytes, context),
             )
         except Exception as exc:
             return TrMythicC2ToCustomMessageFormatMessageResponse(
@@ -218,15 +363,20 @@ class NuwaTranslationContainer(TranslationContainer):
         self, inputMsg: TrCustomMessageToMythicC2FormatMessage
     ) -> TrCustomMessageToMythicC2FormatMessageResponse:
         try:
+            protection = resolve_crypto_selection(
+                inputMsg.CryptoKeys,
+                direction="inbound",
+            )
             context = _build_context(
                 direction="inbound",
                 c2_name=inputMsg.C2Name,
                 uuid=inputMsg.UUID,
             )
-            message_json = decode_wire_message(inputMsg.Message, context).decode("utf-8")
+            decoded = probe_wire_message(inputMsg.Message, context, protection)
+            normalized_message = _normalize_inbound_file_chunks(decoded.message)
             return TrCustomMessageToMythicC2FormatMessageResponse(
                 Success=True,
-                Message=json.loads(message_json),
+                Message=normalized_message,
             )
         except Exception as exc:
             return TrCustomMessageToMythicC2FormatMessageResponse(
@@ -238,7 +388,11 @@ class NuwaTranslationContainer(TranslationContainer):
 __all__ = [
     "DEFAULT_CODEC_PROFILE",
     "DEFAULT_CODEC_VERSION",
+    "DecodedWireMessage",
     "NuwaTranslationContainer",
+    "NUWA_BINARY_FORMAT_FIELD",
+    "NUWA_BYTE_ARRAY_FORMAT",
+    "ProtectionSelection",
     "TrCustomMessageToMythicC2FormatMessage",
     "TrCustomMessageToMythicC2FormatMessageResponse",
     "TrGenerateEncryptionKeysMessage",
@@ -246,11 +400,9 @@ __all__ = [
     "TrMythicC2ToCustomMessageFormatMessage",
     "TrMythicC2ToCustomMessageFormatMessageResponse",
     "TranslationContainer",
-    "WIRE_VERSION_MARKER",
-    "build_marker",
     "decode_wire_message",
     "encode_wire_message",
     "normalize_context",
-    "parse_marker",
+    "probe_wire_message",
     "start",
 ]

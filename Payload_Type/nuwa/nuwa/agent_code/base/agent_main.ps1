@@ -6,7 +6,7 @@ function Write-NuwaDebug {
     )
 
     if ($script:NuwaConfig.DebugLogging) {
-        Write-Host "[Nuwa] $Message"
+        Write-Host "[Status] $Message"
     }
 }
 
@@ -91,6 +91,7 @@ function Invoke-NuwaSendMessage {
         $message[$key] = $Body[$key]
     }
     $message.action = $Action
+    $message = Add-NuwaMessageMetadata -Message $message
 
     $json = $message | ConvertTo-Json -Compress -Depth 20
     $wireBody = ConvertFrom-NuwaUtf8Bytes -Bytes (
@@ -181,7 +182,7 @@ function Invoke-NuwaCheckin {
         }
     }
 
-    throw 'Nuwa checkin failed after 3 attempts'
+    throw 'Checkin failed after 3 attempts'
 }
 
 function ConvertTo-NuwaCommandParameters {

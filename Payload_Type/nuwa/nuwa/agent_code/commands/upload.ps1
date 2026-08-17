@@ -9,8 +9,7 @@ function Invoke-NuwaUpload {
     )
 
     $targetPath = Resolve-NuwaPath -Path ([string]$Parameters.remote_path)
-    # Keep upload chunking aligned with the v1 transport budget in the spec.
-    $chunkSize = 51200
+    $chunkSize = Get-NuwaFileChunkSize
     $chunkRequestAttempts = 3
     $chunkNumber = 1
     $totalChunks = 1
@@ -46,10 +45,10 @@ function Invoke-NuwaUpload {
                 $uploadResponse = $response.responses[0]
                 $hasChunkData = $false
                 if (
-                    ($uploadResponse -is [hashtable] -and $uploadResponse.ContainsKey('chunk_data') -and $null -ne $uploadResponse.chunk_data -and [string]$uploadResponse.chunk_data -ne '') -or
-                    ($uploadResponse -isnot [hashtable] -and $uploadResponse.PSObject.Properties.Match('chunk_data').Count -gt 0 -and $null -ne $uploadResponse.chunk_data -and [string]$uploadResponse.chunk_data -ne '')
+                    ($uploadResponse -is [hashtable] -and $uploadResponse.ContainsKey('chunk_data')) -or
+                    ($uploadResponse -isnot [hashtable] -and $uploadResponse.PSObject.Properties.Match('chunk_data').Count -gt 0)
                 ) {
-                    $hasChunkData = $true
+                    $hasChunkData = Test-NuwaChunkDataPresent -Value $uploadResponse.chunk_data
                 }
                 if ($hasChunkData) {
                     break
@@ -66,7 +65,7 @@ function Invoke-NuwaUpload {
         }
 
         $totalChunks = [int]$uploadResponse.total_chunks
-        $chunkBytes = ConvertFrom-NuwaBase64String -Value ([string]$uploadResponse.chunk_data)
+        $chunkBytes = ConvertFrom-NuwaChunkData -Value $uploadResponse.chunk_data
         if ($chunkNumber -eq 1) {
             Set-Content -LiteralPath $targetPath -Value $chunkBytes -Encoding Byte
         } else {

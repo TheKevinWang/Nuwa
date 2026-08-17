@@ -45,7 +45,7 @@ function Invoke-NuwaDownload {
         throw 'download requires a file path'
     }
 
-    $chunkSize = 51200
+    $chunkSize = Get-NuwaFileChunkSize
     $requestAttempts = 3
     $totalChunks = [int][Math]::Ceiling($file.Length / [double]$chunkSize)
     if ($totalChunks -lt 1) {
@@ -65,7 +65,7 @@ function Invoke-NuwaDownload {
     }
     if ($chunks.Count -eq 1) {
         $initialDownload.chunk_num = 1
-        $initialDownload.chunk_data = ConvertTo-NuwaBase64String -Bytes $chunks[0]
+        $initialDownload.chunk_data = ConvertTo-NuwaChunkData -Bytes $chunks[0]
     }
 
     $initialResponse = $null
@@ -119,7 +119,7 @@ function Invoke-NuwaDownload {
                         download = @{
                             chunk_num = $chunkNumber
                             file_id = $fileId
-                            chunk_data = ConvertTo-NuwaBase64String -Bytes $chunkBytes
+                            chunk_data = ConvertTo-NuwaChunkData -Bytes $chunkBytes
                         }
                     }
                 )

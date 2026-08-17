@@ -9,7 +9,6 @@ function Get-NuwaCodecProfile {
     if ([string]::IsNullOrWhiteSpace($profile)) {
         return 'decimal'
     }
-
     return $profile.ToLowerInvariant()
 }
 
@@ -45,7 +44,6 @@ function Get-NuwaDecodeCodecProfiles {
         }
         $profiles += $profile
     }
-
     return $profiles
 }
 
@@ -101,7 +99,8 @@ function ConvertTo-NuwaWireBytes {
     )
 
     $messageBytes = ConvertTo-NuwaUtf8Bytes -Value $MessageJson
-    return ConvertTo-NuwaInner -Bytes $messageBytes -Context $Context
+    $protectedBytes = [byte[]](Protect-NuwaBytes -Bytes $messageBytes -Context $Context)
+    return ConvertTo-NuwaInner -Bytes $protectedBytes -Context $Context
 }
 
 function Get-NuwaWireDecodeCandidates {
@@ -123,8 +122,13 @@ function Get-NuwaWireDecodeCandidates {
         $attemptContext.codec_profile = $codecProfile
 
         try {
-            $decodedBytes = ConvertFrom-NuwaInner -Bytes $WireBytes -Context $attemptContext
-            $json = ConvertFrom-NuwaUtf8Bytes -Bytes ([byte[]]$decodedBytes)
+            $decodedBytes = [byte[]](
+                ConvertFrom-NuwaInner -Bytes $WireBytes -Context $attemptContext
+            )
+            $messageBytes = [byte[]](
+                Unprotect-NuwaBytes -Bytes $decodedBytes -Context $attemptContext
+            )
+            $json = ConvertFrom-NuwaUtf8Bytes -Bytes $messageBytes
             $trimmedJson = $json.Trim()
             if (-not $trimmedJson.StartsWith('{')) {
                 continue
@@ -139,7 +143,6 @@ function Get-NuwaWireDecodeCandidates {
             CodecProfile = $codecProfile
         }
     }
-
     return $candidates
 }
 

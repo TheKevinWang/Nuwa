@@ -41,3 +41,44 @@ function ConvertFrom-NuwaTransportEnvelope {
         message_bytes = [byte[]]$messageBytes
     }
 }
+
+function Get-NuwaTransportResponseCandidates {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResponseBody,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedUuid,
+
+        [Parameter(Mandatory = $true)]
+        [int]$UuidLength
+    )
+
+    $candidates = @(
+        @{
+            Framing = 'raw'
+            WireBody = $ResponseBody
+            WireBytes = ConvertTo-NuwaUtf8Bytes -Value $ResponseBody
+            Uuid = $ExpectedUuid
+        }
+    )
+
+    try {
+        $decodedEnvelope = ConvertFrom-NuwaTransportEnvelope -Envelope $ResponseBody -UuidLength $UuidLength
+        if (
+            [string]::IsNullOrWhiteSpace($ExpectedUuid) -or
+            [string]$decodedEnvelope.uuid -eq $ExpectedUuid
+        ) {
+            $candidates += @{
+                Framing = 'uuid-envelope'
+                WireBody = ConvertFrom-NuwaUtf8Bytes -Bytes ([byte[]]$decodedEnvelope.message_bytes)
+                WireBytes = [byte[]]$decodedEnvelope.message_bytes
+                Uuid = [string]$decodedEnvelope.uuid
+            }
+        }
+    } catch {
+    }
+
+    return $candidates
+}

@@ -1,1 +1,2 @@
 mythic_container==0.6.0
+cryptography==50.0.0

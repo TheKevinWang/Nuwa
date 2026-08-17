@@ -1,0 +1,2 @@
+Invoke-NuwaRsaStaging
+Start-Nuwa

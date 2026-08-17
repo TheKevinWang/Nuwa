@@ -78,13 +78,7 @@ function Invoke-NuwaHttpRequest {
     foreach ($key in $request.Headers.Keys) {
         $requestHeaders[$key] = $request.Headers[$key]
     }
-    if (-not [string]::IsNullOrWhiteSpace($script:NuwaConfig.ProxyHost)) {
-        $invokeParameters.Proxy = ('{0}:{1}' -f $script:NuwaConfig.ProxyHost, $script:NuwaConfig.ProxyPort)
-        if (-not [string]::IsNullOrWhiteSpace($script:NuwaConfig.ProxyUser)) {
-            $proxyCredentialBytes = ConvertTo-NuwaUtf8Bytes -Value ('{0}:{1}' -f $script:NuwaConfig.ProxyUser, $script:NuwaConfig.ProxyPass)
-            $requestHeaders['Proxy-Authorization'] = ('Basic {0}' -f (ConvertTo-NuwaBase64String -Bytes $proxyCredentialBytes))
-        }
-    }
+    Set-NuwaProxyRequestOptions -InvokeParameters $invokeParameters -RequestHeaders $requestHeaders
     $invokeParameters.Headers = $requestHeaders
 
     Write-NuwaDebug "POST $($request.Uri)"
@@ -105,6 +99,6 @@ function Invoke-NuwaTransport {
         [string]$WireBody
     )
 
-    $body = ConvertTo-NuwaTransportEnvelope -Uuid $Uuid -MessageBytes (ConvertTo-NuwaUtf8Bytes -Value $WireBody)
+    $body = New-NuwaTransportRequestBody -Uuid $Uuid -WireBody $WireBody
     return Invoke-NuwaHttpRequest -Body $body
 }

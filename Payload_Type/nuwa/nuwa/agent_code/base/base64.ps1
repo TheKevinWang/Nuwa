@@ -42,6 +42,7 @@ function ConvertFrom-NuwaBase64String {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Value
     )
 
@@ -100,4 +101,44 @@ function ConvertFrom-NuwaBase64String {
     }
 
     return $decoded
+}
+
+function ConvertTo-NuwaChunkData {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$Bytes
+    )
+
+    return ConvertTo-NuwaBase64String -Bytes $Bytes
+}
+
+function ConvertFrom-NuwaChunkData {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [object]$Value
+    )
+
+    return ConvertFrom-NuwaBase64String -Value ([string]$Value)
+}
+
+function Test-NuwaChunkDataPresent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Value
+    )
+
+    return $null -ne $Value -and -not [string]::IsNullOrEmpty([string]$Value)
+}
+
+function Get-NuwaFileChunkSize {
+    [CmdletBinding()]
+    param()
+
+    return 51200
 }

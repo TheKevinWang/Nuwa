@@ -3,5 +3,5 @@ function Invoke-NuwaExit {
     param()
 
     $script:NuwaState.ExitRequested = $true
-    return 'Nuwa exiting'
+    return 'Agent exiting'
 }
