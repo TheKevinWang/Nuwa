@@ -47,15 +47,15 @@ function Invoke-NuwaDownload {
 
     $chunkSize = Get-NuwaFileChunkSize
     $requestAttempts = 3
-    $totalChunks = [int][Math]::Ceiling($file.Length / [double]$chunkSize)
-    if ($totalChunks -lt 1) {
-        $totalChunks = 1
-    }
     $chunks = Get-NuwaFileChunks -Path $sourcePath -ChunkSize $chunkSize
     if ($chunks -is [byte[]]) {
         $chunks = ,([byte[]]$chunks)
     } elseif ($null -eq $chunks) {
         $chunks = @()
+    }
+    $totalChunks = $chunks.Count
+    if ($totalChunks -lt 1) {
+        $totalChunks = 1
     }
 
     $initialDownload = @{
@@ -78,29 +78,31 @@ function Invoke-NuwaDownload {
                 }
             )
         }
-        if (
-            $null -ne $initialResponse -and
-            (
-                ($initialResponse -is [hashtable] -and $initialResponse.ContainsKey('responses') -and $initialResponse.responses -and $initialResponse.responses.Count -gt 0) -or
-                ($initialResponse.PSObject.Properties.Match('responses').Count -gt 0 -and $initialResponse.responses -and $initialResponse.responses.Count -gt 0)
-            )
-        ) {
+        $initialResponseItems = $null
+        if ($null -ne $initialResponse) {
+            if ($initialResponse -is [hashtable]) {
+                if ($initialResponse.ContainsKey('responses')) {
+                    $initialResponseItems = $initialResponse.responses
+                }
+            } else {
+                try {
+                    $initialResponseItems = $initialResponse.responses
+                } catch {
+                    $initialResponseItems = $null
+                }
+            }
+        }
+        if ($initialResponseItems -and @($initialResponseItems).Count -gt 0) {
             break
         }
         if (($attempt + 1) -lt $requestAttempts) {
             Start-Sleep -Seconds 1
         }
     }
-    if (
-        $null -eq $initialResponse -or
-        (
-            ($initialResponse -is [hashtable] -and (-not $initialResponse.ContainsKey('responses') -or -not $initialResponse.responses -or $initialResponse.responses.Count -eq 0)) -or
-            ($initialResponse -isnot [hashtable] -and ($initialResponse.PSObject.Properties.Match('responses').Count -eq 0 -or -not $initialResponse.responses -or $initialResponse.responses.Count -eq 0))
-        )
-    ) {
+    if ($null -eq $initialResponseItems -or @($initialResponseItems).Count -eq 0) {
         throw 'Download metadata request did not return a file ID'
     }
-    $fileId = [string]$initialResponse.responses[0].file_id
+    $fileId = [string](@($initialResponseItems)[0].file_id)
     $chunkStartIndex = 0
     $chunkNumber = 1
     if ($chunks.Count -eq 1) {
@@ -124,13 +126,21 @@ function Invoke-NuwaDownload {
                     }
                 )
             }
-            if (
-                $null -ne $chunkResponse -and
-                (
-                    ($chunkResponse -is [hashtable] -and $chunkResponse.ContainsKey('responses') -and $chunkResponse.responses -and $chunkResponse.responses.Count -gt 0) -or
-                    ($chunkResponse.PSObject.Properties.Match('responses').Count -gt 0 -and $chunkResponse.responses -and $chunkResponse.responses.Count -gt 0)
-                )
-            ) {
+            $chunkResponseItems = $null
+            if ($null -ne $chunkResponse) {
+                if ($chunkResponse -is [hashtable]) {
+                    if ($chunkResponse.ContainsKey('responses')) {
+                        $chunkResponseItems = $chunkResponse.responses
+                    }
+                } else {
+                    try {
+                        $chunkResponseItems = $chunkResponse.responses
+                    } catch {
+                        $chunkResponseItems = $null
+                    }
+                }
+            }
+            if ($chunkResponseItems -and @($chunkResponseItems).Count -gt 0) {
                 $chunkAcknowledged = $true
                 break
             }

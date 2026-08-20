@@ -20,18 +20,3 @@ function Set-NuwaDiscordProxyInvokeParameters {
         $InvokeParameters.Proxy = ('{0}:{1}' -f $script:NuwaConfig.ProxyHost, $script:NuwaConfig.ProxyPort)
     }
 }
-
-function Set-NuwaDiscordAttachmentProxy {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.Net.Http.HttpClientHandler]$Handler
-    )
-
-    if (-not [string]::IsNullOrWhiteSpace($script:NuwaConfig.ProxyHost)) {
-        $Handler.Proxy = [System.Net.WebProxy]::new(
-            ('{0}:{1}' -f $script:NuwaConfig.ProxyHost, $script:NuwaConfig.ProxyPort)
-        )
-        $Handler.UseProxy = $true
-    }
-}

@@ -122,10 +122,11 @@ function Get-NuwaDiscordEnvelopeProperty {
         }
         return $null
     }
-    if ($Object.PSObject.Properties.Match($Name).Count -gt 0) {
+    try {
         return $Object.$Name
+    } catch {
+        return $null
     }
-    return $null
 }
 
 function Test-NuwaDiscordLegacyEnvelopeWrapper {

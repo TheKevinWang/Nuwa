@@ -1,9 +1,15 @@
 # Nuwa
 
-Nuwa is a single-file Windows PowerShell 5.1 agent for Mythic v3.4 designed for evasion through simplicity and rapid iteration. It
-supports the shared `http` and `discord` C2 profiles through the
-`nuwa_translation` translation container. The generated HTTP payload provides
-partial support for Windows PowerShell 5.1 Constrained Language Mode (CLM).
+Nuwa is a single-file Windows PowerShell 5.1 agent for Mythic v3.4 designed
+for evasion through simplicity and rapid iteration. It emits a minimal payload
+whose custom wire codec can avoid Base64; wire encryption is optional. Both
+profiles use the `nuwa_translation` translation container. Unprotected HTTP
+and Discord builds
+support the tested runtime-selected Windows PowerShell 5.1 Constrained
+Language Mode (CLM) command and transfer surface. The
+`windows-discord-clm-ps1` representative is also deployment-qualified through
+live debug and independent release gates; protected profiles require Full
+Language Mode.
 
 Use Nuwa only on systems you own or are explicitly authorized to test.
 
@@ -90,6 +96,7 @@ The builder exposes four Nuwa-specific parameters:
 | `discord_envelope_codec` | `decimal`, `legacy-json` | `decimal` | Selects how the complete Discord wrapper is rendered; it has no effect on HTTP artifacts. |
 | `debug_logging` | Boolean | `false` | Enables neutral `[Status]` host messages. Plaintext builds retain their existing diagnostics; protected builds never log message bodies or key material. |
 | `require_https` | Boolean | `false` | Rejects an HTTP build unless `callback_host` has an HTTPS scheme and nonempty host. It is a non-emitting build policy; Discord already uses HTTPS. |
+| `powershell_runtime` | `full-language`, `constrained-language` | `full-language` | Statically selects the optimized .NET-backed Full Language protection implementation or the CLM-compatible pure-PowerShell static-protection implementation. It is build composition only and is not emitted as runtime configuration. |
 
 The shared profiles also expose `AESPSK` and `encrypted_exchange_check` as C2
 parameters. Nuwa narrows `AESPSK` to `none`, `nuwa_xor_v1`,
@@ -112,7 +119,7 @@ versioned, reviewed composite with a fixed construction.
 | `none` | compact JSON UTF-8 bytes | No confidentiality, integrity, or peer authentication. |
 | `nuwa_xor_v1` | plaintext XORed with a repeating 32-byte key | Lightweight obfuscation, not security. It has no nonce or authentication tag and is vulnerable to known-plaintext and key-reuse analysis. |
 | `nuwa_hmac_sha256_v1` | `plaintext || HMAC-SHA256(key, plaintext)` | Provides integrity and shared-key authentication, but not confidentiality. |
-| `nuwa_aes256_hmac_v1` | `IV || AES-256-CBC-PKCS7(key, plaintext) || HMAC-SHA256(key, IV || ciphertext)` | Provides confidentiality, integrity, and shared-key authentication. Implementations encrypt first and authenticate `IV || ciphertext`, verify the tag before decryption, and use a fresh random 16-byte IV for every message. |
+| `nuwa_aes256_hmac_v1` | `IV || AES-256-CBC-PKCS7(key, plaintext) || HMAC-SHA256(key, IV || ciphertext)` | Provides confidentiality, integrity, and shared-key authentication. Implementations encrypt first and authenticate `IV || ciphertext`, verify the tag before decryption, and use one fresh 16-byte IV for every message. |
 
 Protection is independent of raw versus legacy Base64 framing, the decimal
 inner codec, Discord's outer envelope codec, and the `require_https` policy.
@@ -130,14 +137,26 @@ depending on the selected profile, but it does not provide forward secrecy or
 survive endpoint compromise. Optional RSA staging narrows post-stage key reuse,
 but it does not change these limitations for the initial embedded key.
 
-All protected profiles require Windows PowerShell 5.1 Full Language Mode.
-Only the unprotected HTTP surface retains the CLM qualification described
-below. When protection is omitted, or explicitly set to `none` together with
-`require_https=false`, the builder selects the unchanged plaintext renderer:
-the generated payload is byte-for-byte identical to the corresponding
-pre-protection artifact and contains no protection code or key. Historical
+`powershell_runtime` selects one backend at payload construction time; Nuwa
+does not inspect PowerShell's language mode or ship both implementations in
+one artifact. Omitted and explicit `full-language` builds use the existing
+optimized .NET implementation and remain byte-for-byte identical. A
+`constrained-language` static XOR, HMAC-SHA256, or AES/HMAC build instead
+contains only the selected pure-PowerShell backend and its necessary helpers.
+The plaintext renderer is unchanged for either runtime selection. Historical
 keyless `aes256_hmac` selections are also treated as this no-op compatibility
 case rather than silently enabling a new protocol.
+
+The constrained AES/HMAC backend obtains two independent `[guid]::NewGuid()` values,
+requires lowercase canonical version-4 GUID text, decodes their 32 hexadecimal
+bytes with script primitives, hashes those bytes with its pure-PowerShell
+SHA-256, and transmits the first 16 digest bytes as the established CBC IV.
+The GUID strings are ephemeral and never transmitted or logged. This is a
+Windows-specific entropy construction; it is not FIPS validated and should not
+be represented as a FIPS random-number generator. The pure-PowerShell backend
+is materially slower than the Full Language .NET backend and makes no
+constant-time or side-channel-resistance claim beyond the best-effort tag
+comparison.
 
 ### Optional RSA-staged session keys
 
@@ -146,6 +165,11 @@ RSA staging is an optional keying mode for exactly one protection profile,
 Set `encrypted_exchange_check=true` for HTTP or `T` for Discord. `none`, XOR,
 HMAC-only, and the historical keyless `aes256_hmac` compatibility shape cannot
 stage, and protection profiles cannot be layered.
+
+A constrained-language build with enabled exchange is rejected before source
+rendering with `Nuwa constrained-language runtime does not support RSA staging;
+disable encrypted_exchange_check or select full-language`. It never falls back
+to a static key, Full Language source, or plaintext.
 
 A staged execution first authenticates Mythic's standard `staging_rsa`
 request and response with the payload UUID and embedded static initial key.
@@ -226,6 +250,12 @@ The staged representatives are `windows-http-aes-staged-ps1`,
 envelope, and HTTPS-policy choices while enabling the profile-specific exchange
 value.
 
+`windows-http-clm-ps1` and `windows-http-aes-static-clm-ps1` select the
+runtime-selected CLM launcher for unprotected and static AES/HMAC raw HTTP.
+Protected Discord CLM is build-, shared-vector-, and bounded mock-composition
+covered, but this release does not claim a long-running protected Discord
+deployment qualification.
+
 Shared profile parameters are materialized into `$script:NuwaConfig`; they are
 not read from the environment at runtime. The common configuration contains
 the payload UUID, profile name, callback interval and jitter, proxy settings,
@@ -273,6 +303,11 @@ Each task-loop iteration performs the following operations:
 3. Execute returned tasks sequentially in response order.
 4. Submit one `action=post_response` message after each task.
 5. Sleep for the current interval plus jitter.
+
+Nuwa retains up to 256 completed task responses in memory, keyed by nonempty
+task ID. If a task is delivered again, Nuwa resends the cached response instead
+of re-executing the command and its side effects. This replay cache is reset
+when the process starts.
 
 Jitter is positive-only: for nonzero jitter, the delay is
 `interval + interval * (jitter / 100) * U[0,1)`, rounded to milliseconds. It
@@ -416,21 +451,30 @@ and `final` fields. False sends the raw UUID-prefixed markerless decimal text
 and adds `message_format: "raw-v1"`. Discord responses remain markerless
 decimal UTF-8 text; arbitrary binary response text is outside this transport
 contract. Wrappers of at most 1,900 characters are posted as message content.
-Larger wrappers are uploaded as a `nuwa-server` JSON attachment.
+Larger wrappers are uploaded as a `status-server` JSON attachment. Discord
+API JSON, inbound attachment retrieval, and manually rendered outbound
+`multipart/form-data` requests all use `Invoke-WebRequest`. The attachment
+metadata size is checked before retrieval and the decoded UTF-8 byte count is
+checked again after retrieval; either value must not exceed 2,097,152 bytes.
 
 After posting, the agent polls the configured channel up to `message_checks`
 times, separated by `time_between_checks` seconds. Candidate responses are
-filtered by direction, client/payload ID, request timestamp, decoded action,
-and, for file transfers, task/file/chunk correlation. Tasking polls prefer a
+filtered by direction, the current callback ID or allowed payload ID, decoded
+action, and, for file transfers, task/file/chunk correlation. Direct polls
+follow the posted request's Discord message ID. Because tasking can be posted
+while a preceding exchange is still completing, a tasking fallback can scan
+channel history; it accepts only messages addressed to the exact live callback
+ID and skips already processed Discord message IDs. Tasking polls prefer a
 response containing tasks and retain an empty response only as a final
-fallback. Processed Discord message IDs are retained in memory to avoid replay;
-Nuwa also makes a best-effort attempt to delete the matched response message.
+fallback. Nuwa makes a best-effort attempt to delete the matched response
+message.
 
 Discord REST calls default to a 30-second timeout and disabled keep-alive.
 Rate-limit (`429`) responses honor `retry_after` plus 100 ms; selected `5xx`
 responses use a 1.1-second retry delay. A request is attempted at most five
-times. The attachment path uses temporary files and `System.Net.Http`, which is
-one reason it is outside the CLM-qualified surface.
+times. The attachment path constructs multipart bytes with PowerShell and
+`Invoke-WebRequest`; it does not use `System.Net.Http` and is included in the
+qualified runtime-selected CLM transport surface.
 
 ## Command reference
 
@@ -455,32 +499,38 @@ arguments or Mythic's upload modal rather than a positional command line.
 
 ## Constrained Language Mode support
 
-Nuwa's generated HTTP payload has been validated with Windows PowerShell 5.1
-running in `ConstrainedLanguage` mode for:
+Nuwa's local Windows PowerShell 5.1 test suite covers unprotected HTTP and
+Discord payloads plus static XOR, HMAC-SHA256, and AES/HMAC protected HTTP
+payloads running in runtime-selected `ConstrainedLanguage` mode for:
 
-- HTTP check-in, task polling, and task response submission
+- Check-in, task polling, task response submission, and Discord attachment
+  upload/download transport paths
 - The `sleep`, `cd`, `whoami`, `hostname`, `ls`, `shell`, and `exit` commands
-- The custom decimal codec and its UTF-8 and transport framing helpers
+- The `upload` and `download` transfer commands
+- The custom decimal codec and its UTF-8, transport framing, and Discord
+  envelope helpers
+- Pure-PowerShell SHA-256/HMAC, AES-256-CBC/PKCS#7, shared wire vectors,
+  authenticated tamper rejection, and GUID-derived IV parsing
 
 The following limitations apply:
 
-- `upload` and `download` are not CLM-compatible because their current
-  response handling invokes methods on non-core PowerShell objects.
-- The Discord transport is not CLM-qualified. Its oversized-message and
-  attachment path uses non-core `System.IO` and `System.Net.Http` APIs that CLM
-  blocks.
-- Every protected profile is Full Language Mode only because its PowerShell
-  implementation uses .NET cryptographic types that are outside Nuwa's
-  qualified CLM surface. This includes XOR despite its simple wire operation;
-  the protected dispatcher is qualified as one Full-Language-only surface.
+- Full Language remains the default and is the only runtime supporting RSA
+  staging. A CLM build supports only static protection and never dynamically
+  falls back to the Full Language backend.
+- The pure-PowerShell crypto implementation is not FIPS validated and may be
+  slower or expose different timing behavior than the .NET implementation.
 - `shell` tasks remain subject to CLM itself. Commands or APIs blocked by the
   host's language mode remain unavailable through Nuwa.
 - Runtime-selected `ConstrainedLanguage` validation does not replace
   qualification under an enforced AppLocker or Windows Defender Application
   Control policy, which can impose additional restrictions.
 
-Nuwa is not fully CLM-compatible. Use the HTTP profile and the validated
-command subset when CLM compatibility is required.
+Runtime-selected CLM support is limited to the tested Windows PowerShell 5.1
+command and transfer surface. The unprotected `windows-discord-clm-ps1`
+representative is deployment-qualified for that surface. Its live debug Gate B
+and independent release Gate C passed the declared command, upload, download,
+state, exit, and cleanup lifecycle. This qualification does not extend to
+protected profiles or enforced application-control environments.
 
 ## Security and trust boundaries
 

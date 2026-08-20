@@ -58,10 +58,11 @@ function ConvertTo-NuwaChunkData {
         [byte[]]$Bytes
     )
 
-    $values = [int[]]::new($Bytes.Length)
-    for ($index = 0; $index -lt $Bytes.Length; $index += 1) {
-        $values[$index] = [int]$Bytes[$index]
-    }
+    $values = @(
+        for ($index = 0; $index -lt $Bytes.Length; $index += 1) {
+            [int]$Bytes[$index]
+        }
+    )
     return ,$values
 }
 
@@ -77,25 +78,26 @@ function ConvertFrom-NuwaChunkData {
         throw 'Chunk data must be an array of byte values'
     }
 
-    $bytes = [byte[]]::new($Value.Count)
-    for ($index = 0; $index -lt $Value.Count; $index += 1) {
-        $item = $Value[$index]
-        $isInteger = (
-            $item -is [byte] -or
-            $item -is [sbyte] -or
-            $item -is [int16] -or
-            $item -is [uint16] -or
-            $item -is [int32] -or
-            $item -is [uint32] -or
-            $item -is [int64] -or
-            $item -is [uint64]
-        )
-        if (-not $isInteger -or [int64]$item -lt 0 -or [uint64]$item -gt 255) {
-            throw ("Chunk data item {0} must be an integer from 0 through 255" -f $index)
+    $bytes = @(
+        for ($index = 0; $index -lt $Value.Count; $index += 1) {
+            $item = $Value[$index]
+            $isInteger = (
+                $item -is [byte] -or
+                $item -is [sbyte] -or
+                $item -is [int16] -or
+                $item -is [uint16] -or
+                $item -is [int32] -or
+                $item -is [uint32] -or
+                $item -is [int64] -or
+                $item -is [uint64]
+            )
+            if (-not $isInteger -or [int64]$item -lt 0 -or [uint64]$item -gt 255) {
+                throw ("Chunk data item {0} must be an integer from 0 through 255" -f $index)
+            }
+            [byte]$item
         }
-        $bytes[$index] = [byte]$item
-    }
-    return ,$bytes
+    )
+    return ,([byte[]]$bytes)
 }
 
 function Test-NuwaChunkDataPresent {

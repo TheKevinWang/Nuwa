@@ -35,21 +35,35 @@ function Invoke-NuwaUpload {
                 )
             }
 
-            if (
-                $null -ne $response -and
-                (
-                    ($response -is [hashtable] -and $response.ContainsKey('responses') -and $response.responses -and $response.responses.Count -gt 0) -or
-                    ($response.PSObject.Properties.Match('responses').Count -gt 0 -and $response.responses -and $response.responses.Count -gt 0)
-                )
-            ) {
-                $uploadResponse = $response.responses[0]
-                $hasChunkData = $false
-                if (
-                    ($uploadResponse -is [hashtable] -and $uploadResponse.ContainsKey('chunk_data')) -or
-                    ($uploadResponse -isnot [hashtable] -and $uploadResponse.PSObject.Properties.Match('chunk_data').Count -gt 0)
-                ) {
-                    $hasChunkData = Test-NuwaChunkDataPresent -Value $uploadResponse.chunk_data
+            $responseItems = $null
+            if ($null -ne $response) {
+                if ($response -is [hashtable]) {
+                    if ($response.ContainsKey('responses')) {
+                        $responseItems = $response.responses
+                    }
+                } else {
+                    try {
+                        $responseItems = $response.responses
+                    } catch {
+                        $responseItems = $null
+                    }
                 }
+            }
+            if ($responseItems -and @($responseItems).Count -gt 0) {
+                $uploadResponse = @($responseItems)[0]
+                $chunkData = $null
+                if ($uploadResponse -is [hashtable]) {
+                    if ($uploadResponse.ContainsKey('chunk_data')) {
+                        $chunkData = $uploadResponse.chunk_data
+                    }
+                } else {
+                    try {
+                        $chunkData = $uploadResponse.chunk_data
+                    } catch {
+                        $chunkData = $null
+                    }
+                }
+                $hasChunkData = Test-NuwaChunkDataPresent -Value $chunkData
                 if ($hasChunkData) {
                     break
                 }
