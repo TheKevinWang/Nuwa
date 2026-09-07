@@ -7,7 +7,10 @@ from types import ModuleType
 
 
 _CODEC_MODULES = {
+    "base64": "nuwa_translation.codecs.base64_codec",
     "decimal": "nuwa_translation.codecs.decimal",
+    "emoji": "nuwa_translation.codecs.emoji",
+    "raw": "nuwa_translation.codecs.raw",
 }
 
 

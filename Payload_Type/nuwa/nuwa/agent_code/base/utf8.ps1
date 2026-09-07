@@ -22,7 +22,11 @@ function ConvertTo-NuwaUtf8Bytes {
         return $asciiBytes
     }
 
-    $bytes = @()
+    # Three bytes per UTF-16 code unit is sufficient even when two code units
+    # form a four-byte UTF-8 sequence.  Preallocating avoids PowerShell's
+    # quadratic array concatenation cost for presentation-sized documents.
+    $bytes = [byte[]]::new($Value.Length * 3)
+    $outputIndex = 0
     $index = 0
     while ($index -lt $Value.Length) {
         $codePoint = [int][char]$Value[$index]
@@ -43,19 +47,23 @@ function ConvertTo-NuwaUtf8Bytes {
         }
 
         if ($codePoint -le 0x7F) {
-            $bytes += $codePoint
+            $bytes[$outputIndex] = [byte]$codePoint
+            $outputIndex += 1
         } elseif ($codePoint -le 0x7FF) {
-            $bytes += (0xC0 -bor ($codePoint -shr 6))
-            $bytes += (0x80 -bor ($codePoint -band 0x3F))
+            $bytes[$outputIndex] = [byte](0xC0 -bor ($codePoint -shr 6))
+            $bytes[$outputIndex + 1] = [byte](0x80 -bor ($codePoint -band 0x3F))
+            $outputIndex += 2
         } elseif ($codePoint -le 0xFFFF) {
-            $bytes += (0xE0 -bor ($codePoint -shr 12))
-            $bytes += (0x80 -bor (($codePoint -shr 6) -band 0x3F))
-            $bytes += (0x80 -bor ($codePoint -band 0x3F))
+            $bytes[$outputIndex] = [byte](0xE0 -bor ($codePoint -shr 12))
+            $bytes[$outputIndex + 1] = [byte](0x80 -bor (($codePoint -shr 6) -band 0x3F))
+            $bytes[$outputIndex + 2] = [byte](0x80 -bor ($codePoint -band 0x3F))
+            $outputIndex += 3
         } elseif ($codePoint -le 0x10FFFF) {
-            $bytes += (0xF0 -bor ($codePoint -shr 18))
-            $bytes += (0x80 -bor (($codePoint -shr 12) -band 0x3F))
-            $bytes += (0x80 -bor (($codePoint -shr 6) -band 0x3F))
-            $bytes += (0x80 -bor ($codePoint -band 0x3F))
+            $bytes[$outputIndex] = [byte](0xF0 -bor ($codePoint -shr 18))
+            $bytes[$outputIndex + 1] = [byte](0x80 -bor (($codePoint -shr 12) -band 0x3F))
+            $bytes[$outputIndex + 2] = [byte](0x80 -bor (($codePoint -shr 6) -band 0x3F))
+            $bytes[$outputIndex + 3] = [byte](0x80 -bor ($codePoint -band 0x3F))
+            $outputIndex += 4
         } else {
             throw "Unicode code point outside UTF-8 range"
         }
@@ -63,7 +71,11 @@ function ConvertTo-NuwaUtf8Bytes {
         $index += 1
     }
 
-    return [byte[]]$bytes
+    $result = [byte[]]::new($outputIndex)
+    for ($copyIndex = 0; $copyIndex -lt $outputIndex; $copyIndex += 1) {
+        $result[$copyIndex] = $bytes[$copyIndex]
+    }
+    return $result
 }
 
 function ConvertFrom-NuwaUtf8Bytes {
@@ -89,7 +101,10 @@ function ConvertFrom-NuwaUtf8Bytes {
         return (-join $asciiCharacters)
     }
 
-    $characters = @()
+    # UTF-8 cannot decode to more UTF-16 code units than it has input bytes.
+    # A fixed buffer keeps large emoji documents linear-time in PowerShell.
+    $characters = [char[]]::new($Bytes.Length)
+    $outputIndex = 0
     $index = 0
     while ($index -lt $Bytes.Length) {
         $first = [int]$Bytes[$index]
@@ -151,17 +166,23 @@ function ConvertFrom-NuwaUtf8Bytes {
         }
 
         if ($codePoint -le 0xFFFF) {
-            $characters += [string][char]$codePoint
+            $characters[$outputIndex] = [char]$codePoint
+            $outputIndex += 1
         } else {
             $surrogateValue = $codePoint - 0x10000
             $high = 0xD800 + ($surrogateValue -shr 10)
             $low = 0xDC00 + ($surrogateValue -band 0x3FF)
-            $characters += [string][char]$high
-            $characters += [string][char]$low
+            $characters[$outputIndex] = [char]$high
+            $characters[$outputIndex + 1] = [char]$low
+            $outputIndex += 2
         }
 
         $index += $width
     }
 
-    return ($characters -join '')
+    $result = [char[]]::new($outputIndex)
+    for ($copyIndex = 0; $copyIndex -lt $outputIndex; $copyIndex += 1) {
+        $result[$copyIndex] = $characters[$copyIndex]
+    }
+    return (-join $result)
 }

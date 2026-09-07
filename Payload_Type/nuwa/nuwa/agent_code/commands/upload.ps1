@@ -90,9 +90,6 @@ function Invoke-NuwaUpload {
 
     return @{
         completed = $true
-        upload = @{
-            file_id = [string]$Parameters.file
-            full_path = $targetPath
-        }
+        user_output = ("Uploaded file to {0}" -f $targetPath)
     }
 }

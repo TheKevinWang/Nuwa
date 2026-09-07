@@ -42,8 +42,8 @@ function Resolve-NuwaResponseBody {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string]$ResponseBody,
+        [AllowNull()]
+        [object]$ResponseBody,
 
         [Parameter(Mandatory = $true)]
         [string]$ExpectedUuid,
@@ -55,34 +55,31 @@ function Resolve-NuwaResponseBody {
         [int]$UuidLength = 36
     )
 
-    if ([string]::IsNullOrWhiteSpace($ResponseBody)) {
+    if ($null -eq $ResponseBody) {
         return $null
     }
-
-    $trimmedBody = $ResponseBody.Trim()
-    $trimmedBody = $trimmedBody.TrimStart([char]0xFEFF)
     $framingCandidates = @(
         Get-NuwaTransportResponseCandidates `
-            -ResponseBody $trimmedBody `
+            -ResponseBody $ResponseBody `
             -ExpectedUuid $ExpectedUuid `
             -UuidLength $UuidLength
     )
 
     $matches = @()
     foreach ($framingCandidate in $framingCandidates) {
-        $decodeCandidates = @(
-            Get-NuwaWireDecodeCandidates `
+        try {
+            $decodedJson = ConvertFrom-NuwaWireBytes `
                 -WireBytes ([byte[]]$framingCandidate.WireBytes) `
                 -Context $Context
-        )
-        foreach ($decodeCandidate in $decodeCandidates) {
             $matches += @{
-                Json = [string]$decodeCandidate.Json
-                WireBody = [string]$framingCandidate.WireBody
-                CodecProfile = [string]$decodeCandidate.CodecProfile
+                Json = [string]$decodedJson
+                WireBody = $framingCandidate.WireBody
+                CodecProfile = [string]$script:NuwaConfig.CodecProfile
                 Framing = [string]$framingCandidate.Framing
                 Uuid = [string]$framingCandidate.Uuid
             }
+        } catch {
+            continue
         }
     }
 
@@ -102,8 +99,8 @@ function ConvertFrom-NuwaResponseBody {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string]$ResponseBody,
+        [AllowNull()]
+        [object]$ResponseBody,
 
         [Parameter(Mandatory = $true)]
         [string]$ExpectedUuid,

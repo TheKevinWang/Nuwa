@@ -116,5 +116,24 @@ function Get-NuwaFileChunkSize {
     [CmdletBinding()]
     param()
 
+    $codecProfile = ([string]$script:NuwaConfig.CodecProfile).Trim().ToLowerInvariant()
+    $transportPresentation = ([string]$script:NuwaConfig.TransportPresentation).Trim().ToLowerInvariant()
+    $outerEmojiEnabled = (
+        [bool]$script:NuwaConfig.TransportEnvelopeEnabled -and
+        $transportPresentation -eq 'emoji'
+    )
+    if (
+        $outerEmojiEnabled -and
+        ([string]$script:NuwaConfig.PowerShellRuntime).Trim().ToLowerInvariant() -eq 'constrained-language'
+    ) {
+        return 51200
+    }
+    if ($outerEmojiEnabled) {
+        return 384
+    }
+    if ($codecProfile -eq 'emoji') {
+        return 384
+    }
+
     return 16384
 }

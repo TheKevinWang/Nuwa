@@ -7,44 +7,9 @@ function Get-NuwaCodecProfile {
 
     $profile = [string]$Context.codec_profile
     if ([string]::IsNullOrWhiteSpace($profile)) {
-        return 'decimal'
+        return 'raw'
     }
     return $profile.ToLowerInvariant()
-}
-
-function Get-NuwaDecodeCodecProfiles {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Context
-    )
-
-    $configuredProfiles = @()
-    foreach ($contextProfile in @($Context.decode_codec_profiles)) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$contextProfile)) {
-            $configuredProfiles += [string]$contextProfile
-        }
-    }
-    if ($configuredProfiles.Count -eq 0) {
-        foreach ($configProfile in @($script:NuwaConfig.DecodeCodecProfiles)) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$configProfile)) {
-                $configuredProfiles += [string]$configProfile
-            }
-        }
-    }
-    if ($configuredProfiles.Count -eq 0) {
-        $configuredProfiles = @('decimal')
-    }
-
-    $profiles = @()
-    foreach ($configuredProfile in $configuredProfiles) {
-        $profile = ([string]$configuredProfile).Trim().ToLowerInvariant()
-        if ([string]::IsNullOrWhiteSpace($profile) -or ($profiles -contains $profile)) {
-            continue
-        }
-        $profiles += $profile
-    }
-    return $profiles
 }
 
 function ConvertTo-NuwaInner {
@@ -57,9 +22,19 @@ function ConvertTo-NuwaInner {
         [hashtable]$Context
     )
 
-    switch (Get-NuwaCodecProfile -Context $Context) {
+    $profile = Get-NuwaCodecProfile -Context $Context
+    if ($profile -eq ('base' + '64')) {
+        return ConvertTo-NuwaRadix64Bytes -Bytes $Bytes -Context $Context
+    }
+    switch ($profile) {
+        'raw' {
+            return ConvertTo-NuwaRawBytes -Bytes $Bytes -Context $Context
+        }
         'decimal' {
             return ConvertTo-NuwaDecimalBytes -Bytes $Bytes -Context $Context
+        }
+        'emoji' {
+            return ConvertTo-NuwaEmojiBytes -Bytes $Bytes -Context $Context
         }
         default {
             throw ("Unsupported codec profile '{0}'" -f (Get-NuwaCodecProfile -Context $Context))
@@ -77,9 +52,19 @@ function ConvertFrom-NuwaInner {
         [hashtable]$Context
     )
 
-    switch (Get-NuwaCodecProfile -Context $Context) {
+    $profile = Get-NuwaCodecProfile -Context $Context
+    if ($profile -eq ('base' + '64')) {
+        return ConvertFrom-NuwaRadix64Bytes -Bytes $Bytes -Context $Context
+    }
+    switch ($profile) {
+        'raw' {
+            return ConvertFrom-NuwaRawBytes -Bytes $Bytes -Context $Context
+        }
         'decimal' {
             return ConvertFrom-NuwaDecimalBytes -Bytes $Bytes -Context $Context
+        }
+        'emoji' {
+            return ConvertFrom-NuwaEmojiBytes -Bytes $Bytes -Context $Context
         }
         default {
             throw ("Unsupported codec profile '{0}'" -f (Get-NuwaCodecProfile -Context $Context))
@@ -103,70 +88,6 @@ function ConvertTo-NuwaWireBytes {
     return ConvertTo-NuwaInner -Bytes $protectedBytes -Context $Context
 }
 
-function Get-NuwaWireDecodeCandidates {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [byte[]]$WireBytes,
-
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Context
-    )
-
-    $candidates = @()
-    foreach ($codecProfile in @(Get-NuwaDecodeCodecProfiles -Context $Context)) {
-        $attemptContext = @{}
-        foreach ($contextKey in $Context.Keys) {
-            $attemptContext[$contextKey] = $Context[$contextKey]
-        }
-        $attemptContext.codec_profile = $codecProfile
-
-        try {
-            $decodedBytes = [byte[]](
-                ConvertFrom-NuwaInner -Bytes $WireBytes -Context $attemptContext
-            )
-            $messageBytes = [byte[]](
-                Unprotect-NuwaBytes -Bytes $decodedBytes -Context $attemptContext
-            )
-            $json = ConvertFrom-NuwaUtf8Bytes -Bytes $messageBytes
-            $trimmedJson = $json.Trim()
-            if (-not $trimmedJson.StartsWith('{')) {
-                continue
-            }
-            $null = $trimmedJson | ConvertFrom-Json -ErrorAction Stop
-        } catch {
-            continue
-        }
-
-        $candidates += @{
-            Json = $json
-            CodecProfile = $codecProfile
-        }
-    }
-    return $candidates
-}
-
-function Resolve-NuwaWireBytes {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [byte[]]$WireBytes,
-
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Context
-    )
-
-    $candidates = @(Get-NuwaWireDecodeCandidates -WireBytes $WireBytes -Context $Context)
-    if ($candidates.Count -eq 0) {
-        throw 'No Nuwa codec accepted the wire payload'
-    }
-    if ($candidates.Count -gt 1) {
-        $matchingProfiles = (($candidates | ForEach-Object { [string]$_.CodecProfile }) -join ', ')
-        throw ("Ambiguous Nuwa wire payload: {0}" -f $matchingProfiles)
-    }
-    return $candidates[0]
-}
-
 function ConvertFrom-NuwaWireBytes {
     [CmdletBinding()]
     param(
@@ -177,6 +98,12 @@ function ConvertFrom-NuwaWireBytes {
         [hashtable]$Context
     )
 
-    $resolved = Resolve-NuwaWireBytes -WireBytes $WireBytes -Context $Context
-    return [string]$resolved.Json
+    $decodedBytes = ConvertFrom-NuwaInner -Bytes $WireBytes -Context $Context
+    $messageBytes = Unprotect-NuwaBytes -Bytes ([byte[]]$decodedBytes) -Context $Context
+    $json = ConvertFrom-NuwaUtf8Bytes -Bytes ([byte[]]$messageBytes)
+    $parsed = $json | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $parsed -or -not $json.Trim().StartsWith('{')) {
+        throw 'Nuwa wire message must be a JSON object'
+    }
+    return [string]$json
 }

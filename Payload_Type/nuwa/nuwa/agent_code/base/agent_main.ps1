@@ -109,7 +109,7 @@ function Invoke-NuwaSendMessage {
         -ExpectedUuid $Uuid `
         -UuidLength $script:NuwaConfig.MessageUuidLength `
         -Context (Get-NuwaCodecContext -Direction 'inbound' -Uuid $Uuid -MessageType $Action)
-    Write-NuwaDebug "Response JSON: $decodedJson"
+    Write-NuwaDebug ("Received response for action {0} ({1} characters)" -f $Action, $decodedJson.Length)
     return (ConvertFrom-NuwaJsonObject -Value $decodedJson)
 }
 
