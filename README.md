@@ -3,7 +3,7 @@
 Nuwa is a Windows PowerShell 5.1 agent for
 Mythic v3.4, designed for evasion through simplicity and rapid iteration. It
 supports a minimal payload with a pluggable codec system designed to make custom
-encodings easy to add. The [DiscordX](https://github.com/TheKevinWang/discordx) (`discordx`) C2 profile also supports
+encodings easy to add. The [discordx](https://github.com/TheKevinWang/discordx) C2 profile also supports
 encryption and custom encoding of the routing envelope.
 
 Optional inner message encryption uses AES-256-CBC with HMAC-SHA256
