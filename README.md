@@ -1,5 +1,6 @@
-# Nuwa
-
+<p align="center">
+<img src="./nuwa.png" width="400">
+</p>
 Nuwa is a Windows PowerShell 5.1 agent for
 Mythic v3.4, designed for evasion through simplicity and rapid iteration. It
 supports a minimal payload with a pluggable codec system designed to make custom
