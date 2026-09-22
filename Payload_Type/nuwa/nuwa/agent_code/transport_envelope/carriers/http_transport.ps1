@@ -8,19 +8,17 @@ function Invoke-NuwaTransport {
         [string]$Action,
 
         [Parameter(Mandatory = $true)]
-        [string]$WireBody
+        [byte[]]$WireBody
     )
 
-    $body = New-NuwaTransportRequestBody -Uuid $Uuid -WireBody $WireBody
+    [byte[]]$body = New-NuwaTransportRequestBody -Uuid $Uuid -WireBody $WireBody
     $wrapper = @{
         message = $body
         sender_id = $Uuid
         to_server = $true
         id = 1
         final = $true
-    }
-    if ([string]$script:NuwaConfig.TransportMessageFormat -eq 'raw-v1') {
-        $wrapper.message_format = 'raw-v1'
+        message_format = 'raw-v1'
     }
     $document = ConvertTo-NuwaTransportEnvelopeDocument `
         -Wrapper $wrapper `
@@ -33,14 +31,14 @@ function Invoke-NuwaTransport {
         if ([string]$responseWrapper.client_id -cne $Uuid) {
             throw 'Transport response route is invalid'
         }
-        if (
-            -not [string]::IsNullOrEmpty([string]$responseWrapper.message_format) -and
-            [string]$responseWrapper.message_format -cne 'raw-v1'
-        ) {
+        if ([string]$responseWrapper.message_format -cne 'raw-v1') {
             throw 'Transport response format is invalid'
         }
-        return [string]$responseWrapper.message
+        return ,([byte[]]$responseWrapper.message)
     } catch {
+        if ([bool]$script:NuwaConfig.DebugLogging) {
+            Write-NuwaDebug ("HTTP envelope decode failed: {0}" -f $_.Exception.Message)
+        }
         throw 'Transport response is invalid'
     }
 }

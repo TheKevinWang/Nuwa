@@ -15,6 +15,33 @@ function Get-NuwaDiscordApiHeaders {
     }
 }
 
+function Get-NuwaDiscordApiUri {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $apiVersion = [int]$script:NuwaConfig.DiscordApiVersion
+    if ($apiVersion -ne 10) {
+        throw 'Unsupported Discord API version'
+    }
+    return ([string]$script:NuwaConfig.DiscordApiOrigin).TrimEnd('/') +
+        ('/api/v{0}/' -f $apiVersion) + $Path.TrimStart('/')
+}
+
+function Assert-NuwaDiscordAttachmentUri {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Url)
+
+    $actual = [Uri]$Url
+    $expected = [Uri]([string]$script:NuwaConfig.DiscordCdnOrigin)
+    if (-not $actual.IsAbsoluteUri -or
+        $actual.Scheme -ne $expected.Scheme -or
+        $actual.Host -ne $expected.Host -or
+        $actual.Port -ne $expected.Port) {
+        throw 'Discord attachment URL is outside the configured CDN origin'
+    }
+    return $actual.AbsoluteUri
+}
+
 function Get-NuwaDiscordMessagesUri {
     [CmdletBinding()]
     param(
@@ -25,7 +52,8 @@ function Get-NuwaDiscordMessagesUri {
         [string]$AfterMessageId = ''
     )
 
-    $uri = ('https://discord.com/api/v10/channels/{0}/messages?limit={1}' -f $script:NuwaConfig.BotChannel, $Limit)
+    $uri = Get-NuwaDiscordApiUri -Path (
+        'channels/{0}/messages?limit={1}' -f $script:NuwaConfig.BotChannel, $Limit)
     if (-not [string]::IsNullOrWhiteSpace($AfterMessageId)) {
         if ($AfterMessageId -notmatch '^[0-9]+$') {
             throw 'Discord after_message_id must contain decimal digits only'
@@ -39,7 +67,8 @@ function Get-NuwaDiscordChannelUri {
     [CmdletBinding()]
     param()
 
-    return ('https://discord.com/api/v10/channels/{0}/messages' -f $script:NuwaConfig.BotChannel)
+    return Get-NuwaDiscordApiUri -Path (
+        'channels/{0}/messages' -f $script:NuwaConfig.BotChannel)
 }
 
 # NUWA_DISCORD_FIXED_ENCODE_BEGIN
@@ -189,10 +218,11 @@ function Get-NuwaDiscordAttachmentContent {
         -ChildPath ('nuwa-discord-{0}-{1}.tmp' -f $PID, (Get-Random))
     try {
         $invokeParameters = @{
-            Uri = $Url
+            Uri = Assert-NuwaDiscordAttachmentUri -Url $Url
             Method = 'GET'
             OutFile = $downloadPath
             UseBasicParsing = $true
+            MaximumRedirection = 0
         }
         Set-NuwaDiscordProxyInvokeParameters -InvokeParameters $invokeParameters
         Invoke-NuwaDiscordWebRequest -InvokeParameters $invokeParameters | Out-Null
@@ -1141,6 +1171,12 @@ function Invoke-NuwaDiscordRequest {
                 -not [string]::IsNullOrWhiteSpace([string](Get-NuwaDiscordObjectProperty -Object $matched -Name '_discord_message_id'))
             ) {
                 $script:NuwaDiscordProcessedMessageIds += [string](Get-NuwaDiscordObjectProperty -Object $matched -Name '_discord_message_id')
+                if ($script:NuwaDiscordProcessedMessageIds.Count -gt 2048) {
+                    $script:NuwaDiscordProcessedMessageIds = @(
+                        $script:NuwaDiscordProcessedMessageIds |
+                            Select-Object -Last 2048
+                    )
+                }
             }
             foreach ($message in $messages) {
                 $candidate = ConvertFrom-NuwaDiscordMessage -Message $message

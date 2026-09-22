@@ -93,13 +93,10 @@ function Invoke-NuwaSendMessage {
     $message.action = $Action
     $message = Add-NuwaMessageMetadata -Message $message
 
-    $json = $message | ConvertTo-Json -Compress -Depth 20
-    $wireBody = ConvertFrom-NuwaUtf8Bytes -Bytes (
-        ConvertTo-NuwaWireBytes -MessageJson $json -Context (Get-NuwaCodecContext -Direction 'outbound' -Uuid $Uuid -MessageType $Action)
-    )
+    [byte[]]$wireBody = ConvertTo-NuwaWireBytes -Message $message -Context (Get-NuwaCodecContext -Direction 'outbound' -Uuid $Uuid -MessageType $Action)
     Write-NuwaDebug ("Sending action {0} for {1}" -f $Action, $Uuid)
     $rawResponse = Invoke-NuwaTransport -Uuid $Uuid -Action $Action -WireBody $wireBody
-    if ([string]::IsNullOrWhiteSpace($rawResponse)) {
+    if ($null -eq $rawResponse -or ([byte[]]$rawResponse).Length -eq 0) {
         Write-NuwaDebug ("No transport response for action {0} on {1}" -f $Action, $Uuid)
         return $null
     }

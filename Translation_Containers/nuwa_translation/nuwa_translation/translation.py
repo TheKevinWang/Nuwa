@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import re
 import secrets
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -73,7 +75,7 @@ except ImportError:  # pragma: no cover - unit test fallback
         author: str = ""
         semver: str = ""
 
-from .codec_registry import get_codec, list_codecs
+from .binary_v1 import decode_binary_v1, encode_binary_v1
 from .protection import (
     AUTHENTICATION_ERROR,
     HISTORICAL_AES256_HMAC,
@@ -89,7 +91,7 @@ from .protection import (
 )
 
 
-DEFAULT_CODEC_PROFILE = "raw"
+DEFAULT_CODEC_PROFILE = "binary-v1"
 DEFAULT_CODEC_VERSION = "1"
 NUWA_CODEC_HINT_FIELD = "nuwa_codec_profile"
 NUWA_BINARY_FORMAT_FIELD = "nuwa_binary_format"
@@ -125,9 +127,9 @@ def normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def encode_wire_message(message_bytes: bytes, context: dict[str, Any] | None = None) -> bytes:
-    normalized = normalize_context(context)
-    codec = get_codec(normalized["codec_profile"])
-    return codec.encode_inner(bytes(message_bytes), normalized)
+    """Return already-serialized binary v1 bytes without another inner codec."""
+    decode_binary_v1(message_bytes)
+    return bytes(message_bytes)
 
 
 def probe_wire_message(
@@ -135,31 +137,13 @@ def probe_wire_message(
     context: dict[str, Any] | None = None,
     protection: ProtectionSelection | None = None,
 ) -> DecodedWireMessage:
-    candidates: list[DecodedWireMessage] = []
-    payload = bytes(wire_bytes)
     selected = protection or ProtectionSelection()
-    authentication_failed = False
-
-    for codec_profile in list_codecs():
-        try:
-            candidate = decode_with_codec(payload, codec_profile, context, selected)
-        except ProtectionAuthenticationError:
-            authentication_failed = True
-            continue
-        except Exception:
-            continue
-        candidates.append(candidate)
-
-    if not candidates:
-        if authentication_failed:
-            raise ProtectionAuthenticationError(AUTHENTICATION_ERROR)
-        raise ValueError("No Nuwa codec accepted the wire payload")
-    if len(candidates) > 1:
-        matching_profiles = ", ".join(
-            candidate.codec_profile for candidate in candidates
-        )
-        raise ValueError(f"Ambiguous Nuwa wire payload: {matching_profiles}")
-    return candidates[0]
+    message_bytes = unprotect_message(selected.profile, selected.key, bytes(wire_bytes))
+    return DecodedWireMessage(
+        codec_profile=DEFAULT_CODEC_PROFILE,
+        message_bytes=message_bytes,
+        message=decode_binary_v1(message_bytes),
+    )
 
 
 def decode_with_codec(
@@ -168,30 +152,10 @@ def decode_with_codec(
     context: dict[str, Any] | None = None,
     protection: ProtectionSelection | None = None,
 ) -> DecodedWireMessage:
-    """Fully validate one codec candidate without consulting prior messages."""
-    if codec_profile not in list_codecs():
+    """Decode only the configured binary inner v1 representation."""
+    if codec_profile != DEFAULT_CODEC_PROFILE:
         raise ValueError(f"Unsupported Nuwa codec profile: {codec_profile}")
-    attempt_context = normalize_context(context)
-    attempt_context["codec_profile"] = codec_profile
-    selected = protection or ProtectionSelection()
-    message_bytes = get_codec(codec_profile).decode_inner(
-        bytes(wire_bytes),
-        attempt_context,
-    )
-    message_bytes = unprotect_message(
-        selected.profile,
-        selected.key,
-        message_bytes,
-    )
-    message_text = message_bytes.decode("utf-8", errors="strict")
-    message = json.loads(message_text)
-    if not isinstance(message, dict):
-        raise ValueError("Nuwa wire message must decode to a JSON object")
-    return DecodedWireMessage(
-        codec_profile=codec_profile,
-        message_bytes=message_bytes,
-        message=message,
-    )
+    return probe_wire_message(wire_bytes, context, protection)
 
 
 def decode_wire_message(
@@ -201,84 +165,77 @@ def decode_wire_message(
     return probe_wire_message(wire_bytes, context).message_bytes
 
 
-def _uses_byte_array_chunks(message: dict[str, Any]) -> bool:
-    return message.get(NUWA_BINARY_FORMAT_FIELD) == NUWA_BYTE_ARRAY_FORMAT
+def _boundary_bytes(value: Any, location: str, *, inbound: bool) -> bytes | str:
+    if inbound:
+        if not isinstance(value, bytes):
+            raise ValueError(f"{location} must be raw bytes on binary v1")
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, list):
+        if any(type(item) is not int or item < 0 or item > 255 for item in value):
+            raise ValueError(f"{location} must contain byte values from 0 to 255")
+        return bytes(value)
+    if not isinstance(value, str):
+        raise ValueError(f"{location} must be Base64 text or a byte array at the Mythic boundary")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except Exception as exc:
+        raise ValueError(f"{location} is not valid Base64 data") from exc
+    if base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError(f"{location} is not canonical Base64 data")
+    return decoded
 
 
-def _normalize_inbound_file_chunks(message: dict[str, Any]) -> dict[str, Any]:
+def _boundary_id(value: Any, location: str, *, inbound: bool) -> bytes | str:
+    if inbound:
+        if not isinstance(value, bytes) or len(value) != 16:
+            raise ValueError(f"{location} must be exactly 16 raw bytes")
+        return value.hex()
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{32}", value) is None:
+        raise ValueError(f"{location} must be 32 lowercase hexadecimal characters")
+    return bytes.fromhex(value)
+
+
+def _normalize_binary_boundaries(message: dict[str, Any], *, inbound: bool) -> dict[str, Any]:
     normalized = copy.deepcopy(message)
-    if not _uses_byte_array_chunks(normalized):
-        return normalized
+    for hint in (NUWA_CODEC_HINT_FIELD, NUWA_BINARY_FORMAT_FIELD):
+        if hint in normalized:
+            raise ValueError(f"{hint} is not part of Nuwa binary v1")
 
-    responses = normalized.get("responses")
-    if responses is None:
-        return normalized
+    responses = normalized.get("responses", [])
     if not isinstance(responses, list):
-        raise ValueError("responses must be an array when using byte-array chunks")
-
-    for response_index, response in enumerate(responses):
+        raise ValueError("responses must be an array")
+    for index, response in enumerate(responses):
         if not isinstance(response, dict):
             continue
-        download = response.get("download")
-        if not isinstance(download, dict) or "chunk_data" not in download:
-            continue
-        location = f"responses[{response_index}].download.chunk_data"
-        chunk_data = download["chunk_data"]
-        if not isinstance(chunk_data, list):
-            raise ValueError(f"{location} must be an array of integers")
-        for item_index, item in enumerate(chunk_data):
-            if isinstance(item, bool) or not isinstance(item, int):
-                raise ValueError(
-                    f"{location}[{item_index}] must be an integer from 0 through 255"
+        for parent, path in ((response, f"responses[{index}]"),
+                             (response.get("download"), f"responses[{index}].download")):
+            if isinstance(parent, dict) and "chunk_data" in parent:
+                parent["chunk_data"] = _boundary_bytes(
+                    parent["chunk_data"], f"{path}.chunk_data", inbound=inbound
                 )
-            if item < 0 or item > 255:
-                raise ValueError(
-                    f"{location}[{item_index}] must be an integer from 0 through 255"
-                )
-        download["chunk_data"] = base64.b64encode(bytes(chunk_data)).decode("ascii")
-    return normalized
 
-
-def _normalize_outbound_file_chunks(message: dict[str, Any]) -> dict[str, Any]:
-    normalized = copy.deepcopy(message)
-    if not _uses_byte_array_chunks(normalized):
-        return normalized
-
-    normalized.pop(NUWA_BINARY_FORMAT_FIELD, None)
-    responses = normalized.get("responses")
-    if responses is None:
-        return normalized
-    if not isinstance(responses, list):
-        raise ValueError("responses must be an array when using byte-array chunks")
-
-    for response_index, response in enumerate(responses):
-        if not isinstance(response, dict) or "chunk_data" not in response:
-            continue
-        location = f"responses[{response_index}].chunk_data"
-        chunk_data = response["chunk_data"]
-        if isinstance(chunk_data, str):
-            try:
-                decoded = base64.b64decode(chunk_data, validate=True)
-            except Exception as exc:
-                raise ValueError(f"{location} is not valid Base64 data") from exc
-            response["chunk_data"] = list(decoded)
-            continue
-        if isinstance(chunk_data, list):
-            for item_index, item in enumerate(chunk_data):
-                if isinstance(item, bool) or not isinstance(item, int):
-                    raise ValueError(
-                        f"{location}[{item_index}] must be an integer from 0 through 255"
-                    )
-                if item < 0 or item > 255:
-                    raise ValueError(
-                        f"{location}[{item_index}] must be an integer from 0 through 255"
-                    )
-            response["chunk_data"] = list(chunk_data)
-            continue
-        raise ValueError(
-            f"{location} must be a Base64 string or byte array "
-            f"(got {type(chunk_data).__name__})"
+    socks = normalized.get("socks", [])
+    if not isinstance(socks, list):
+        raise ValueError("socks must be an array")
+    for index, record in enumerate(socks):
+        if not isinstance(record, dict):
+            raise ValueError(f"socks[{index}] must be a map")
+        if "data" in record:
+            record["data"] = _boundary_bytes(
+                record["data"], f"socks[{index}].data", inbound=inbound
+            )
+    if "socks_batch_id" in normalized:
+        normalized["socks_batch_id"] = _boundary_id(
+            normalized["socks_batch_id"], "socks_batch_id", inbound=inbound
         )
+    if "socks_ack" in normalized:
+        acknowledgments = normalized["socks_ack"]
+        if not isinstance(acknowledgments, list):
+            raise ValueError("socks_ack must be an array")
+        normalized["socks_ack"] = [
+            _boundary_id(item, f"socks_ack[{index}]", inbound=inbound)
+            for index, item in enumerate(acknowledgments)
+        ]
     return normalized
 
 
@@ -333,7 +290,7 @@ def _build_context(
 
 class NuwaTranslationContainer(TranslationContainer):
     name = "nuwa_translation"
-    description = "Nuwa translation container for custom codec-based HTTP wire messages."
+    description = "Nuwa translation container for strict binary inner v1 messages."
     author = "@openai"
     semver = "1.3.0"
 
@@ -370,34 +327,22 @@ class NuwaTranslationContainer(TranslationContainer):
             )
             if not isinstance(inputMsg.Message, dict):
                 raise ValueError("Outbound Nuwa message must be a dictionary")
-            cleaned_message = copy.deepcopy(inputMsg.Message)
-            codec_profile = cleaned_message.pop(NUWA_CODEC_HINT_FIELD, None)
-            if not isinstance(codec_profile, str) or codec_profile not in list_codecs():
-                raise ValueError(
-                    f"Outbound Nuwa message requires canonical {NUWA_CODEC_HINT_FIELD}"
-                )
-            normalized_message = _normalize_outbound_file_chunks(cleaned_message)
-            context = _build_context(
-                direction="outbound",
-                c2_name=inputMsg.C2Name,
-                uuid=inputMsg.UUID,
-                message=normalized_message,
-                default_codec_profile=codec_profile,
-            )
-            context["codec_profile"] = codec_profile
-            message_bytes = json.dumps(
-                normalized_message,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
+            normalized_message = _normalize_binary_boundaries(inputMsg.Message, inbound=False)
+            message_bytes = encode_binary_v1(normalized_message)
             protected_bytes = protect_message(
                 protection.profile,
                 protection.key,
                 message_bytes,
             )
+            route = str(inputMsg.UUID)
+            try:
+                if str(uuid.UUID(route)) != route:
+                    raise ValueError
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ValueError("Outbound Nuwa route UUID must be canonical") from exc
             return TrMythicC2ToCustomMessageFormatMessageResponse(
                 Success=True,
-                Message=encode_wire_message(protected_bytes, context),
+                Message=route.encode("ascii") + protected_bytes,
             )
         except Exception as exc:
             return TrMythicC2ToCustomMessageFormatMessageResponse(
@@ -413,14 +358,8 @@ class NuwaTranslationContainer(TranslationContainer):
                 inputMsg.CryptoKeys,
                 direction="inbound",
             )
-            context = _build_context(
-                direction="inbound",
-                c2_name=inputMsg.C2Name,
-                uuid=inputMsg.UUID,
-            )
-            decoded = probe_wire_message(inputMsg.Message, context, protection)
-            normalized_message = _normalize_inbound_file_chunks(decoded.message)
-            normalized_message[NUWA_CODEC_HINT_FIELD] = decoded.codec_profile
+            decoded = probe_wire_message(inputMsg.Message, protection=protection)
+            normalized_message = _normalize_binary_boundaries(decoded.message, inbound=True)
             return TrCustomMessageToMythicC2FormatMessageResponse(
                 Success=True,
                 Message=normalized_message,

@@ -46,7 +46,6 @@ function Add-NuwaMessageMetadata {
         [hashtable]$Message
     )
 
-    $Message.nuwa_binary_format = 'byte_array'
     return $Message
 }
 
@@ -58,12 +57,7 @@ function ConvertTo-NuwaChunkData {
         [byte[]]$Bytes
     )
 
-    $values = @(
-        for ($index = 0; $index -lt $Bytes.Length; $index += 1) {
-            [int]$Bytes[$index]
-        }
-    )
-    return ,$values
+    return ,([byte[]]$Bytes)
 }
 
 function ConvertFrom-NuwaChunkData {
@@ -115,25 +109,5 @@ function Test-NuwaChunkDataPresent {
 function Get-NuwaFileChunkSize {
     [CmdletBinding()]
     param()
-
-    $codecProfile = ([string]$script:NuwaConfig.CodecProfile).Trim().ToLowerInvariant()
-    $transportPresentation = ([string]$script:NuwaConfig.TransportPresentation).Trim().ToLowerInvariant()
-    $outerEmojiEnabled = (
-        [bool]$script:NuwaConfig.TransportEnvelopeEnabled -and
-        $transportPresentation -eq 'emoji'
-    )
-    if (
-        $outerEmojiEnabled -and
-        ([string]$script:NuwaConfig.PowerShellRuntime).Trim().ToLowerInvariant() -eq 'constrained-language'
-    ) {
-        return 51200
-    }
-    if ($outerEmojiEnabled) {
-        return 384
-    }
-    if ($codecProfile -eq 'emoji') {
-        return 384
-    }
-
     return 16384
 }

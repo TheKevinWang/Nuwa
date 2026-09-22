@@ -1,10 +1,26 @@
 <p align="center">
 <img src="./nuwa.png" width="400">
 </p>
+
+## Current binary v1 contract
+
+New Nuwa payloads use `codec_profile=binary-v1` and `use_base64=false` with
+`transport_envelope_format=binary-v1` on HTTP or DiscordX. The inner message
+is a canonical binary map; file chunks and SOCKS data are byte strings. The
+previous JSON, raw, decimal, emoji, and legacy Base64 inner formats are not
+accepted by this v1 contract. Install matching payload, translation, and C2
+profile revisions together. The current build choices and supported stacks
+are documented in [configuration](documentation-payload/nuwa/configuration.md).
+
+The sections below describe the preceding protocol and remain for migration
+reference until the binary v1 live qualification is complete.
+
 Nuwa is a Windows PowerShell 5.1 agent for
-Mythic v3.4, designed for evasion through simplicity and rapid iteration. It
-supports a minimal payload with a pluggable codec system designed to make custom
-encodings easy to add. The [discordx](https://github.com/TheKevinWang/discordx) C2 profile also supports
+Mythic v3.4, with support for constrained language mode and full language,
+designed for evasion through simplicity and rapid iteration. It emits a minimal
+payload, with optional encryption, and with a pluggable codec system designed
+to make custom encodings easy to add. The
+[DiscordX (`discordx`)](https://github.com/TheKevinWang/discordx) C2 profile also supports
 encryption and custom encoding of the routing envelope.
 
 Optional inner message encryption uses AES-256-CBC with HMAC-SHA256
@@ -88,6 +104,8 @@ the static or staged check-in and task-loop entry point
 This is static composition, not a runtime branch or dynamic loading. An HTTP build contains no
 Discord transport implementation or Discord credentials; a Discord build
 contains no HTTP endpoint configuration or HTTP transport implementation. The
+Mythic payload metadata enables command selection so an omitted `socks` command
+stays out of the artifact; Nuwa has no runtime `load` command. The
 legacy selection includes the established UUID envelope, file-string, and
 credentialed-proxy helpers. The raw selection includes only direct request
 framing, byte-array file helpers, and unauthenticated proxy support. The script
@@ -749,7 +767,6 @@ extend to enforced application-control environments.
   and privileges of the hosting process.
 - `upload` overwrites an existing destination. File paths are resolved relative
   to Nuwa's logical working directory unless absolute or UNC.
-- Discord channel history is a shared persistence and correlation surface.
   Message deletion is best-effort and is not a retention guarantee.
 
 ## Development and validation

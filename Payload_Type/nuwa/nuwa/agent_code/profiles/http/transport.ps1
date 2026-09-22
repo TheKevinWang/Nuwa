@@ -94,6 +94,9 @@ function Invoke-NuwaFullLanguageHttpRequest {
             $webRequest.SetRequestHeader('Content-Type', 'application/octet-stream')
         }
         $webRequest.Send($BodyBytes)
+        if ([int]$webRequest.Status -ne 200) {
+            throw ("HTTP request failed with status {0}" -f [int]$webRequest.Status)
+        }
         $responseBytes = [byte[]]$webRequest.ResponseBody
         return ConvertFrom-NuwaHttpContent -Content $responseBytes
     } finally {

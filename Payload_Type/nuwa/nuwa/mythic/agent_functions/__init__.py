@@ -8,6 +8,7 @@ from .hostname import HostnameCommand
 from .ls import LsCommand
 from .shell import ShellCommand
 from .sleep import SleepCommand
+from .socks import SocksCommand
 from .upload import UploadCommand
 from .whoami import WhoamiCommand
 
@@ -20,6 +21,7 @@ __all__ = [
     "LsCommand",
     "ShellCommand",
     "SleepCommand",
+    "SocksCommand",
     "UploadCommand",
     "WhoamiCommand",
 ]
