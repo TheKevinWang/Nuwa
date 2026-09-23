@@ -2,19 +2,6 @@
 <img src="./nuwa.png" width="400">
 </p>
 
-## Current binary v1 contract
-
-New Nuwa payloads use `codec_profile=binary-v1` and `use_base64=false` with
-`transport_envelope_format=binary-v1` on HTTP or DiscordX. The inner message
-is a canonical binary map; file chunks and SOCKS data are byte strings. The
-previous JSON, raw, decimal, emoji, and legacy Base64 inner formats are not
-accepted by this v1 contract. Install matching payload, translation, and C2
-profile revisions together. The current build choices and supported stacks
-are documented in [configuration](documentation-payload/nuwa/configuration.md).
-
-The sections below describe the preceding protocol and remain for migration
-reference until the binary v1 live qualification is complete.
-
 Nuwa is a Windows PowerShell 5.1 agent for
 Mythic v3.4, with support for constrained language mode and full language,
 designed for evasion through simplicity and rapid iteration. It emits a minimal
@@ -32,6 +19,19 @@ authentication) or AES-256-CBC with HMAC-SHA256 (`aes256-hmac-v1`), alongside
 XOR obfuscation, no protection, and custom envelope encoding.
 
 Use Nuwa only on systems you own or are explicitly authorized to test.
+
+## Current binary v1 contract
+
+New Nuwa payloads use `codec_profile=binary-v1` and `use_base64=false` with
+`transport_envelope_format=binary-v1` on HTTP or DiscordX. The inner message
+is a canonical binary map; file chunks and SOCKS data are byte strings. The
+previous JSON, raw, decimal, emoji, and legacy Base64 inner formats are not
+accepted by this v1 contract. Install matching payload, translation, and C2
+profile revisions together. The current build choices and supported stacks
+are documented in [configuration](documentation-payload/nuwa/configuration.md).
+
+The sections below describe the preceding protocol and remain for migration
+reference until the binary v1 live qualification is complete.
 
 ## Installation
 
