@@ -10,7 +10,7 @@ function ConvertTo-NuwaTransportEnvelopeBytes {
     if (-not (Test-NuwaCanonicalUuid -Value $route)) { throw 'Binary transport route is not canonical' }
     $message = [byte[]]$Wrapper.message
     if ($message.Length -eq 0) { throw 'Binary transport message is empty' }
-    $raw = [string]$script:NuwaConfig.TransportMessageFormat -eq 'raw-v1'
+    $raw = [int]$script:NuwaConfig[$script:NuwaL_TransportMessageFormat] -eq $script:NuwaF_raw
     if (-not (Test-NuwaTransportFrameRoute -Message $message -Route $route)) { throw 'Binary transport message UUID does not match its route' }
     [byte]$flags = if ($toServer) { 1 } else { 0 }
     if ($raw) { $flags = [byte]($flags -bor 2) }
@@ -26,7 +26,7 @@ function ConvertFrom-NuwaTransportEnvelopeBytes {
     $toServer = ($flags -band 1) -ne 0
     if ($toServer -ne ($ExpectedDirection -eq 'agent-to-server')) { throw 'Binary transport direction mismatch' }
     $raw = ($flags -band 2) -ne 0
-    if ($raw -ne ([string]$script:NuwaConfig.TransportMessageFormat -eq 'raw-v1')) { throw 'Binary transport framing mismatch' }
+    if ($raw -ne ([int]$script:NuwaConfig[$script:NuwaL_TransportMessageFormat] -eq $script:NuwaF_raw)) { throw 'Binary transport framing mismatch' }
     $route = ConvertFrom-NuwaUtf8Bytes -Bytes (Copy-NuwaTransportBytes -Bytes $Bytes -Offset 1 -Length 36)
     if (-not (Test-NuwaCanonicalUuid -Value $route)) { throw 'Binary transport route is not canonical' }
     $message = [byte[]](Copy-NuwaTransportBytes -Bytes $Bytes -Offset 37 -Length ($Bytes.Length - 37))

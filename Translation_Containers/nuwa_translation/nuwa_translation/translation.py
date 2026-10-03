@@ -8,6 +8,7 @@ import json
 import re
 import secrets
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,6 +77,11 @@ except ImportError:  # pragma: no cover - unit test fallback
         semver: str = ""
 
 from .binary_v1 import decode_binary_v1, encode_binary_v1
+from .binary_v2 import PREFIX as BINARY_V2_PREFIX, decode_binary_v2, encode_binary_v2
+from .binary_v3 import decode_binary_v3, encode_binary_v3
+from .protocol_v3 import from_agent_record as from_agent_record_v3, to_agent_record as to_agent_record_v3
+from .profile_lookup_v3 import resolve_profile_for_route
+from .protocol_v2 import from_agent_record, to_agent_record
 from .protection import (
     AUTHENTICATION_ERROR,
     HISTORICAL_AES256_HMAC,
@@ -91,8 +97,8 @@ from .protection import (
 )
 
 
-DEFAULT_CODEC_PROFILE = "binary-v1"
-DEFAULT_CODEC_VERSION = "1"
+DEFAULT_CODEC_PROFILE = "binary-v2"
+DEFAULT_CODEC_VERSION = "2"
 NUWA_CODEC_HINT_FIELD = "nuwa_codec_profile"
 NUWA_BINARY_FORMAT_FIELD = "nuwa_binary_format"
 NUWA_BYTE_ARRAY_FORMAT = "byte_array"
@@ -117,7 +123,8 @@ def normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
         normalized.get("codec_profile") or DEFAULT_CODEC_PROFILE
     ).lower()
     normalized["codec_version"] = str(
-        normalized.get("codec_version") or DEFAULT_CODEC_VERSION
+        normalized.get("codec_version") or
+        ("1" if normalized["codec_profile"] == "binary-v1" else DEFAULT_CODEC_VERSION)
     )
     normalized.setdefault("direction", "")
     normalized.setdefault("uuid", "")
@@ -127,8 +134,11 @@ def normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def encode_wire_message(message_bytes: bytes, context: dict[str, Any] | None = None) -> bytes:
-    """Return already-serialized binary v1 bytes without another inner codec."""
-    decode_binary_v1(message_bytes)
+    """Validate and return an already serialized binary agent message."""
+    if bytes(message_bytes).startswith(BINARY_V2_PREFIX):
+        from_agent_record(decode_binary_v2(message_bytes))
+    else:
+        decode_binary_v1(message_bytes)
     return bytes(message_bytes)
 
 
@@ -139,10 +149,16 @@ def probe_wire_message(
 ) -> DecodedWireMessage:
     selected = protection or ProtectionSelection()
     message_bytes = unprotect_message(selected.profile, selected.key, bytes(wire_bytes))
+    if message_bytes.startswith(BINARY_V2_PREFIX):
+        profile = "binary-v2"
+        message = from_agent_record(decode_binary_v2(message_bytes))
+    else:
+        profile = "binary-v1"
+        message = decode_binary_v1(message_bytes)
     return DecodedWireMessage(
-        codec_profile=DEFAULT_CODEC_PROFILE,
+        codec_profile=profile,
         message_bytes=message_bytes,
-        message=decode_binary_v1(message_bytes),
+        message=message,
     )
 
 
@@ -152,10 +168,13 @@ def decode_with_codec(
     context: dict[str, Any] | None = None,
     protection: ProtectionSelection | None = None,
 ) -> DecodedWireMessage:
-    """Decode only the configured binary inner v1 representation."""
-    if codec_profile != DEFAULT_CODEC_PROFILE:
+    """Decode the selected canonical binary representation."""
+    if codec_profile not in ("binary-v1", "binary-v2"):
         raise ValueError(f"Unsupported Nuwa codec profile: {codec_profile}")
-    return probe_wire_message(wire_bytes, context, protection)
+    decoded = probe_wire_message(wire_bytes, context, protection)
+    if decoded.codec_profile != codec_profile:
+        raise ValueError("Nuwa binary codec version does not match selection")
+    return decoded
 
 
 def decode_wire_message(
@@ -168,7 +187,7 @@ def decode_wire_message(
 def _boundary_bytes(value: Any, location: str, *, inbound: bool) -> bytes | str:
     if inbound:
         if not isinstance(value, bytes):
-            raise ValueError(f"{location} must be raw bytes on binary v1")
+            raise ValueError(f"{location} must be raw bytes on the agent wire")
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, list):
         if any(type(item) is not int or item < 0 or item > 255 for item in value):
@@ -199,7 +218,7 @@ def _normalize_binary_boundaries(message: dict[str, Any], *, inbound: bool) -> d
     normalized = copy.deepcopy(message)
     for hint in (NUWA_CODEC_HINT_FIELD, NUWA_BINARY_FORMAT_FIELD):
         if hint in normalized:
-            raise ValueError(f"{hint} is not part of Nuwa binary v1")
+            raise ValueError(f"{hint} is not part of the Nuwa agent message")
 
     responses = normalized.get("responses", [])
     if not isinstance(responses, list):
@@ -217,6 +236,10 @@ def _normalize_binary_boundaries(message: dict[str, Any], *, inbound: bool) -> d
     socks = normalized.get("socks", [])
     if not isinstance(socks, list):
         raise ValueError("socks must be an array")
+    if "socks" in normalized and not socks:
+        raise ValueError("socks must be a nonempty array")
+    if bool(socks) != ("socks_batch_id" in normalized):
+        raise ValueError("socks_batch_id requires a nonempty socks array")
     for index, record in enumerate(socks):
         if not isinstance(record, dict):
             raise ValueError(f"socks[{index}] must be a map")
@@ -230,8 +253,8 @@ def _normalize_binary_boundaries(message: dict[str, Any], *, inbound: bool) -> d
         )
     if "socks_ack" in normalized:
         acknowledgments = normalized["socks_ack"]
-        if not isinstance(acknowledgments, list):
-            raise ValueError("socks_ack must be an array")
+        if not isinstance(acknowledgments, list) or not acknowledgments:
+            raise ValueError("socks_ack must be a nonempty array")
         normalized["socks_ack"] = [
             _boundary_id(item, f"socks_ack[{index}]", inbound=inbound)
             for index, item in enumerate(acknowledgments)
@@ -283,16 +306,41 @@ def _build_context(
                 message,
                 default=default_codec_profile,
             ),
-            "codec_version": DEFAULT_CODEC_VERSION,
+            "codec_version": "1" if _resolve_codec_profile(
+                message, default=default_codec_profile
+            ) == "binary-v1" else DEFAULT_CODEC_VERSION,
         }
     )
 
 
 class NuwaTranslationContainer(TranslationContainer):
     name = "nuwa_translation"
-    description = "Nuwa translation container for strict binary inner v1 messages."
+    description = "Nuwa translation container for versioned canonical binary messages."
     author = "@openai"
     semver = "1.3.0"
+
+    async def _lookup_control_profile(self, route: str):
+        resolver = getattr(self, "_profile_resolver", None)
+        if resolver is not None:
+            return await resolver(route)
+        # Local protocol tests construct the container without a RabbitMQ
+        # connection. A live container always uses the authoritative route RPC.
+        if mythic_container is None or mythic_container.RabbitmqConnection.conn is None:
+            return None
+        return await resolve_profile_for_route(route)
+
+    def _remember_wire_version(self, c2_name: str, route: str, profile: str) -> None:
+        if not hasattr(self, "_observed_wire_versions"):
+            self._observed_wire_versions: OrderedDict[tuple[str, str], str] = OrderedDict()
+        key = (str(c2_name), str(route))
+        self._observed_wire_versions[key] = profile
+        self._observed_wire_versions.move_to_end(key)
+        if len(self._observed_wire_versions) > 4096:
+            self._observed_wire_versions.popitem(last=False)
+
+    def _wire_version_for_route(self, c2_name: str, route: str) -> str:
+        versions = getattr(self, "_observed_wire_versions", {})
+        return versions.get((str(c2_name), str(route)), DEFAULT_CODEC_PROFILE)
 
     async def generate_keys(
         self, inputMsg: TrGenerateEncryptionKeysMessage
@@ -328,13 +376,24 @@ class NuwaTranslationContainer(TranslationContainer):
             if not isinstance(inputMsg.Message, dict):
                 raise ValueError("Outbound Nuwa message must be a dictionary")
             normalized_message = _normalize_binary_boundaries(inputMsg.Message, inbound=False)
-            message_bytes = encode_binary_v1(normalized_message)
+            route = str(inputMsg.UUID)
+            control_profile = await self._lookup_control_profile(route)
+            if control_profile is not None and control_profile.kind == "binary-v3":
+                message_bytes = encode_binary_v3(
+                    to_agent_record_v3(normalized_message, control_profile), control_profile,
+                )
+            else:
+                selected_codec = self._wire_version_for_route(inputMsg.C2Name, route)
+                message_bytes = (
+                    encode_binary_v1(normalized_message)
+                    if selected_codec == "binary-v1" else
+                    encode_binary_v2(to_agent_record(normalized_message))
+                )
             protected_bytes = protect_message(
                 protection.profile,
                 protection.key,
                 message_bytes,
             )
-            route = str(inputMsg.UUID)
             try:
                 if str(uuid.UUID(route)) != route:
                     raise ValueError
@@ -358,8 +417,19 @@ class NuwaTranslationContainer(TranslationContainer):
                 inputMsg.CryptoKeys,
                 direction="inbound",
             )
-            decoded = probe_wire_message(inputMsg.Message, protection=protection)
+            control_profile = await self._lookup_control_profile(str(inputMsg.UUID))
+            if control_profile is not None and control_profile.kind == "binary-v3":
+                message_bytes = unprotect_message(protection.profile, protection.key, bytes(inputMsg.Message))
+                decoded = DecodedWireMessage(
+                    codec_profile="binary-v3", message_bytes=message_bytes,
+                    message=from_agent_record_v3(
+                        decode_binary_v3(message_bytes, control_profile), control_profile,
+                    ),
+                )
+            else:
+                decoded = probe_wire_message(inputMsg.Message, protection=protection)
             normalized_message = _normalize_binary_boundaries(decoded.message, inbound=True)
+            self._remember_wire_version(inputMsg.C2Name, inputMsg.UUID, decoded.codec_profile)
             return TrCustomMessageToMythicC2FormatMessageResponse(
                 Success=True,
                 Message=normalized_message,

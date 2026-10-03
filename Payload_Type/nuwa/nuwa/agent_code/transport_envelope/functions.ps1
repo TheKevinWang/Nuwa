@@ -107,7 +107,7 @@ function Test-NuwaTransportWrapper {
     $final = Get-NuwaTransportEnvelopeProperty $Wrapper 'final'
     $version = Get-NuwaTransportEnvelopeProperty $Wrapper 'envelope_version'
     $presentation = Get-NuwaTransportEnvelopeProperty $Wrapper 'envelope_codec'
-    if ($message -isnot [string] -or $sender -isnot [string] -or $sender -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return $false }
+    if ($message -isnot [string] -or $sender -isnot [string] -or -not (Test-NuwaCanonicalUuid -Value $sender)) { return $false }
     if ($toServer -isnot [bool] -or $id -ne 1 -or $final -isnot [bool] -or -not $final -or $version -ne 1) { return $false }
     if ($presentation -isnot [string] -or $presentation -cne [string]$script:NuwaConfig.TransportPresentation) { return $false }
     if ($null -ne $format -and ($format -isnot [string] -or $format -cne 'raw-v1')) { return $false }
@@ -115,7 +115,7 @@ function Test-NuwaTransportWrapper {
         if (-not $toServer -or $names -contains 'client_id') { return $false }
         $route = $sender
     } else {
-        if ($toServer -or $client -isnot [string] -or $client -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return $false }
+        if ($toServer -or $client -isnot [string] -or -not (Test-NuwaCanonicalUuid -Value $client)) { return $false }
         $route = $client
     }
     if ($format -ceq 'raw-v1' -and ($message.Length -lt 36 -or $message.Substring(0, 36) -cne $route)) { return $false }

@@ -101,8 +101,9 @@ except ImportError:  # pragma: no cover - unit test fallback
         pass
 
 
-def make_task_data(task_id: int, **kwargs) -> PTTaskMessageAllData:
-    return PTTaskMessageAllData(
+def make_task_data(task_id: int, **kwargs) -> SimpleNamespace:
+    """Build the small task shape used by local command tests across SDK versions."""
+    return SimpleNamespace(
         Task=SimpleNamespace(ID=task_id),
         args=SimpleNamespace(get_arg=lambda name: kwargs.get(name), has_arg=lambda name: name in kwargs),
     )

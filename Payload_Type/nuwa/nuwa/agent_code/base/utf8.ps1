@@ -1,3 +1,22 @@
+function Test-NuwaCanonicalUuid {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return $false
+    }
+    try {
+        $parsed = [Guid]::Parse($Value)
+    } catch {
+        return $false
+    }
+    return ($Value -ceq $parsed.ToString('D'))
+}
+
 function ConvertTo-NuwaUtf8Bytes {
     [CmdletBinding()]
     param(
@@ -32,18 +51,18 @@ function ConvertTo-NuwaUtf8Bytes {
         $codePoint = [int][char]$Value[$index]
         if ($codePoint -ge 0xD800 -and $codePoint -le 0xDBFF) {
             if ($index + 1 -ge $Value.Length) {
-                throw "Incomplete surrogate pair in UTF-16 input"
+                throw
             }
 
             $lowSurrogate = [int][char]$Value[$index + 1]
             if ($lowSurrogate -lt 0xDC00 -or $lowSurrogate -gt 0xDFFF) {
-                throw "Invalid surrogate pair in UTF-16 input"
+                throw
             }
 
             $codePoint = 0x10000 + (($codePoint - 0xD800) * 0x400) + ($lowSurrogate - 0xDC00)
             $index += 1
         } elseif ($codePoint -ge 0xDC00 -and $codePoint -le 0xDFFF) {
-            throw "Unexpected low surrogate in UTF-16 input"
+            throw
         }
 
         if ($codePoint -le 0x7F) {
@@ -65,7 +84,7 @@ function ConvertTo-NuwaUtf8Bytes {
             $bytes[$outputIndex + 3] = [byte](0x80 -bor ($codePoint -band 0x3F))
             $outputIndex += 4
         } else {
-            throw "Unicode code point outside UTF-8 range"
+            throw
         }
 
         $index += 1
@@ -115,35 +134,35 @@ function ConvertFrom-NuwaUtf8Bytes {
         } elseif ($first -ge 0xC2 -and $first -le 0xDF) {
             $width = 2
             if ($index + $width -gt $Bytes.Length) {
-                throw "Truncated UTF-8 sequence"
+                throw
             }
 
             $second = [int]$Bytes[$index + 1]
             if ($second -lt 0x80 -or $second -gt 0xBF) {
-                throw "Invalid UTF-8 continuation byte"
+                throw
             }
 
             $codePoint = (($first -band 0x1F) -shl 6) -bor ($second -band 0x3F)
         } elseif ($first -ge 0xE0 -and $first -le 0xEF) {
             $width = 3
             if ($index + $width -gt $Bytes.Length) {
-                throw "Truncated UTF-8 sequence"
+                throw
             }
 
             $second = [int]$Bytes[$index + 1]
             $third = [int]$Bytes[$index + 2]
             if ($second -lt 0x80 -or $second -gt 0xBF -or $third -lt 0x80 -or $third -gt 0xBF) {
-                throw "Invalid UTF-8 continuation byte"
+                throw
             }
 
             $codePoint = (($first -band 0x0F) -shl 12) -bor (($second -band 0x3F) -shl 6) -bor ($third -band 0x3F)
             if ($codePoint -lt 0x800 -or ($codePoint -ge 0xD800 -and $codePoint -le 0xDFFF)) {
-                throw "Invalid UTF-8 code point"
+                throw
             }
         } elseif ($first -ge 0xF0 -and $first -le 0xF4) {
             $width = 4
             if ($index + $width -gt $Bytes.Length) {
-                throw "Truncated UTF-8 sequence"
+                throw
             }
 
             $second = [int]$Bytes[$index + 1]
@@ -154,15 +173,15 @@ function ConvertFrom-NuwaUtf8Bytes {
                 $third -lt 0x80 -or $third -gt 0xBF -or
                 $fourth -lt 0x80 -or $fourth -gt 0xBF
             ) {
-                throw "Invalid UTF-8 continuation byte"
+                throw
             }
 
             $codePoint = (($first -band 0x07) -shl 18) -bor (($second -band 0x3F) -shl 12) -bor (($third -band 0x3F) -shl 6) -bor ($fourth -band 0x3F)
             if ($codePoint -lt 0x10000 -or $codePoint -gt 0x10FFFF) {
-                throw "Invalid UTF-8 code point"
+                throw
             }
         } else {
-            throw "Invalid UTF-8 leading byte"
+            throw
         }
 
         if ($codePoint -le 0xFFFF) {

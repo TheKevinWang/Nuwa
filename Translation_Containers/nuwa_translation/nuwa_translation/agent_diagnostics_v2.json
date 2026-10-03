@@ -1,0 +1,753 @@
+{
+  "diagnostics": [
+    {
+      "argument_types": [],
+      "code": 1100,
+      "text": "Binary transport direction is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1101,
+      "text": "Binary transport direction mismatch"
+    },
+    {
+      "argument_types": [],
+      "code": 1102,
+      "text": "Binary transport envelope has reserved flag bits"
+    },
+    {
+      "argument_types": [],
+      "code": 1103,
+      "text": "Binary transport envelope is too short"
+    },
+    {
+      "argument_types": [],
+      "code": 1104,
+      "text": "Binary transport framing mismatch"
+    },
+    {
+      "argument_types": [],
+      "code": 1105,
+      "text": "Binary transport message UUID does not match its route"
+    },
+    {
+      "argument_types": [],
+      "code": 1106,
+      "text": "Binary transport message is empty"
+    },
+    {
+      "argument_types": [],
+      "code": 1107,
+      "text": "Binary transport route is not canonical"
+    },
+    {
+      "argument_types": [],
+      "code": 1108,
+      "text": "Binary v2 ack entry must be 16 bytes"
+    },
+    {
+      "argument_types": [],
+      "code": 1109,
+      "text": "Binary v2 array count exceeds remaining bytes"
+    },
+    {
+      "argument_types": [],
+      "code": 1110,
+      "text": "Binary v2 batch ID must be 16 bytes"
+    },
+    {
+      "argument_types": [],
+      "code": 1111,
+      "text": "Binary v2 batch ID requires records"
+    },
+    {
+      "argument_types": [],
+      "code": 1112,
+      "text": "Binary v2 document exceeds 524288 bytes"
+    },
+    {
+      "argument_types": [],
+      "code": 1113,
+      "text": "Binary v2 document has trailing bytes"
+    },
+    {
+      "argument_types": [],
+      "code": 1114,
+      "text": "Binary v2 field ID is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1115,
+      "text": "Binary v2 map count exceeds remaining bytes"
+    },
+    {
+      "argument_types": [],
+      "code": 1116,
+      "text": "Binary v2 map keys must be integers"
+    },
+    {
+      "argument_types": [],
+      "code": 1117,
+      "text": "Binary v2 nesting exceeds 20"
+    },
+    {
+      "argument_types": [],
+      "code": 1118,
+      "text": "Binary v2 root must be a map"
+    },
+    {
+      "argument_types": [],
+      "code": 1119,
+      "text": "Binary v2 varint is too long"
+    },
+    {
+      "argument_types": [],
+      "code": 1120,
+      "text": "Binary v2 varint overflow"
+    },
+    {
+      "argument_types": [],
+      "code": 1121,
+      "text": "Binary v2 version prefix is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1122,
+      "text": "Checkin failed after 3 attempts"
+    },
+    {
+      "argument_types": [],
+      "code": 1123,
+      "text": "DER length cannot be negative"
+    },
+    {
+      "argument_types": [],
+      "code": 1124,
+      "text": "DER positive integer cannot be empty"
+    },
+    {
+      "argument_types": [],
+      "code": 1125,
+      "text": "Discord API request exceeded retry attempts"
+    },
+    {
+      "argument_types": [],
+      "code": 1126,
+      "text": "Discord Gateway URL is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1127,
+      "text": "Discord Gateway closed the WebSocket"
+    },
+    {
+      "argument_types": [],
+      "code": 1128,
+      "text": "Discord Gateway did not send HELLO"
+    },
+    {
+      "argument_types": [],
+      "code": 1129,
+      "text": "Discord Gateway frame exceeded the bounded size"
+    },
+    {
+      "argument_types": [],
+      "code": 1130,
+      "text": "Discord Gateway heartbeat acknowledgment missed"
+    },
+    {
+      "argument_types": [],
+      "code": 1131,
+      "text": "Discord Gateway heartbeat interval is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1132,
+      "text": "Discord Gateway interrupted SOCKS recovery"
+    },
+    {
+      "argument_types": [],
+      "code": 1133,
+      "text": "Discord Gateway sent a non-text frame"
+    },
+    {
+      "argument_types": [],
+      "code": 1134,
+      "text": "Discord after_message_id must contain a valid unsigned decimal identifier"
+    },
+    {
+      "argument_types": [],
+      "code": 1135,
+      "text": "Discord attachment URL is outside the configured CDN origin"
+    },
+    {
+      "argument_types": [],
+      "code": 1136,
+      "text": "Discord bot identity is unavailable"
+    },
+    {
+      "argument_types": [],
+      "code": 1137,
+      "text": "Discord envelope attachment download produced no file"
+    },
+    {
+      "argument_types": [],
+      "code": 1138,
+      "text": "Discord envelope attachment exceeds the UTF-8 byte limit"
+    },
+    {
+      "argument_types": [],
+      "code": 1139,
+      "text": "Discord recovery GET exceeded rate-limit retries"
+    },
+    {
+      "argument_types": [],
+      "code": 1140,
+      "text": "Discovered Discord Gateway must use wss"
+    },
+    {
+      "argument_types": [
+        "int"
+      ],
+      "code": 1141,
+      "text": "HTTP request failed with status {0}"
+    },
+    {
+      "argument_types": [],
+      "code": 1142,
+      "text": "Malformed SOCKS acknowledgment"
+    },
+    {
+      "argument_types": [],
+      "code": 1143,
+      "text": "Malformed SOCKS batch ID"
+    },
+    {
+      "argument_types": [],
+      "code": 1144,
+      "text": "No Nuwa codec accepted the wire payload"
+    },
+    {
+      "argument_types": [],
+      "code": 1145,
+      "text": "Noncanonical binary v2 negative integer"
+    },
+    {
+      "argument_types": [],
+      "code": 1146,
+      "text": "Nonfinite binary v2 float"
+    },
+    {
+      "argument_types": [],
+      "code": 1147,
+      "text": "Nonminimal binary v2 varint"
+    },
+    {
+      "argument_types": [],
+      "code": 1148,
+      "text": "Numeric agent field is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1149,
+      "text": "Nuwa AES protection requires a 32-byte key and 16-byte IV"
+    },
+    {
+      "argument_types": [],
+      "code": 1150,
+      "text": "Nuwa CLM AES state is unavailable"
+    },
+    {
+      "argument_types": [],
+      "code": 1151,
+      "text": "Nuwa CLM GUID entropy is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1152,
+      "text": "Nuwa CLM MGF1 length is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1153,
+      "text": "Nuwa CLM RSA DER encoding failed"
+    },
+    {
+      "argument_types": [],
+      "code": 1154,
+      "text": "Nuwa CLM RSA bytes are invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1155,
+      "text": "Nuwa CLM RSA entropy failed"
+    },
+    {
+      "argument_types": [],
+      "code": 1156,
+      "text": "Nuwa CLM RSA entropy request is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1157,
+      "text": "Nuwa CLM RSA integer conversion failed"
+    },
+    {
+      "argument_types": [],
+      "code": 1158,
+      "text": "Nuwa CLM RSA key generation failed"
+    },
+    {
+      "argument_types": [],
+      "code": 1159,
+      "text": "Nuwa CLM RSA modulus is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1160,
+      "text": "Nuwa CLM RSA representative is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1161,
+      "text": "Nuwa CLM SHA-1 input is too large"
+    },
+    {
+      "argument_types": [],
+      "code": 1162,
+      "text": "Nuwa CLM SHA-1 rotation is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1163,
+      "text": "Nuwa CLM SHA-256 input is too large"
+    },
+    {
+      "argument_types": [],
+      "code": 1164,
+      "text": "Nuwa CLM byte join requires byte arrays"
+    },
+    {
+      "argument_types": [],
+      "code": 1165,
+      "text": "Nuwa CLM byte length is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1166,
+      "text": "Nuwa CLM byte slice is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1167,
+      "text": "Nuwa CLM hexadecimal text has an invalid length"
+    },
+    {
+      "argument_types": [],
+      "code": 1168,
+      "text": "Nuwa CLM hexadecimal text is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1169,
+      "text": "Nuwa protection authentication failed"
+    },
+    {
+      "argument_types": [],
+      "code": 1170,
+      "text": "Nuwa protection key is unavailable"
+    },
+    {
+      "argument_types": [],
+      "code": 1171,
+      "text": "RSA public parameters are incomplete"
+    },
+    {
+      "argument_types": [],
+      "code": 1172,
+      "text": "RSA staging failed after 3 attempts"
+    },
+    {
+      "argument_types": [],
+      "code": 1173,
+      "text": "RSA staging response UUID must differ from the payload UUID"
+    },
+    {
+      "argument_types": [],
+      "code": 1174,
+      "text": "RSA staging response UUID was not canonical"
+    },
+    {
+      "argument_types": [],
+      "code": 1175,
+      "text": "RSA staging response action did not match"
+    },
+    {
+      "argument_types": [],
+      "code": 1176,
+      "text": "RSA staging response must decrypt to exactly one 32-byte key"
+    },
+    {
+      "argument_types": [],
+      "code": 1177,
+      "text": "RSA staging response session identifier did not match"
+    },
+    {
+      "argument_types": [],
+      "code": 1178,
+      "text": "RSA staging response session key decryption failed"
+    },
+    {
+      "argument_types": [],
+      "code": 1179,
+      "text": "RSA staging returned no response"
+    },
+    {
+      "argument_types": [],
+      "code": 1180,
+      "text": "RSA staging session key must use strict Base64 encoding"
+    },
+    {
+      "argument_types": [],
+      "code": 1181,
+      "text": "SOCKS Discord document exceeds the byte ceiling"
+    },
+    {
+      "argument_types": [],
+      "code": 1182,
+      "text": "SOCKS batch exceeds data ceiling"
+    },
+    {
+      "argument_types": [],
+      "code": 1183,
+      "text": "SOCKS batch names an inactive listener port"
+    },
+    {
+      "argument_types": [],
+      "code": 1184,
+      "text": "SOCKS batch record count is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1185,
+      "text": "SOCKS batch sequence exhausted"
+    },
+    {
+      "argument_types": [],
+      "code": 1186,
+      "text": "SOCKS callback route is unavailable"
+    },
+    {
+      "argument_types": [],
+      "code": 1187,
+      "text": "SOCKS cleanup queue is full"
+    },
+    {
+      "argument_types": [],
+      "code": 1188,
+      "text": "SOCKS connection limit reached"
+    },
+    {
+      "argument_types": [],
+      "code": 1189,
+      "text": "SOCKS destination write queue is full"
+    },
+    {
+      "argument_types": [],
+      "code": 1190,
+      "text": "SOCKS initial request exceeded limit"
+    },
+    {
+      "argument_types": [],
+      "code": 1191,
+      "text": "SOCKS outbound batch could not fit a record"
+    },
+    {
+      "argument_types": [],
+      "code": 1192,
+      "text": "SOCKS outbound queue is full"
+    },
+    {
+      "argument_types": [],
+      "code": 1193,
+      "text": "SOCKS record names an inactive listener port"
+    },
+    {
+      "argument_types": [],
+      "code": 1194,
+      "text": "SOCKS recovery exceeded its 5000-message history window"
+    },
+    {
+      "argument_types": [],
+      "code": 1195,
+      "text": "SOCKS recovery live-event buffer is full"
+    },
+    {
+      "argument_types": [],
+      "code": 1196,
+      "text": "SOCKS runtime requires FullLanguage PowerShell"
+    },
+    {
+      "argument_types": [],
+      "code": 1197,
+      "text": "SOCKS runtime requires a configured DiscordX SOCKS channel"
+    },
+    {
+      "argument_types": [],
+      "code": 1198,
+      "text": "SOCKS server_id changed listener port"
+    },
+    {
+      "argument_types": [],
+      "code": 1199,
+      "text": "Transport Base64 document contains an invalid character"
+    },
+    {
+      "argument_types": [],
+      "code": 1200,
+      "text": "Transport Base64 document has invalid padding"
+    },
+    {
+      "argument_types": [],
+      "code": 1201,
+      "text": "Transport Base64 document is not canonical"
+    },
+    {
+      "argument_types": [],
+      "code": 1202,
+      "text": "Transport Base64 document is not valid canonical Base64"
+    },
+    {
+      "argument_types": [],
+      "code": 1203,
+      "text": "Transport Base64 document length must be divisible by 4"
+    },
+    {
+      "argument_types": [],
+      "code": 1204,
+      "text": "Transport Base64 padding is allowed only in the final quartet"
+    },
+    {
+      "argument_types": [],
+      "code": 1205,
+      "text": "Transport byte part is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1206,
+      "text": "Transport byte slice is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1207,
+      "text": "Transport decimal contains a non-digit"
+    },
+    {
+      "argument_types": [],
+      "code": 1208,
+      "text": "Transport decimal group exceeds 255"
+    },
+    {
+      "argument_types": [],
+      "code": 1209,
+      "text": "Transport decimal length is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1210,
+      "text": "Transport direction is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1211,
+      "text": "Transport entropy length is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1212,
+      "text": "Transport envelope authentication failed"
+    },
+    {
+      "argument_types": [],
+      "code": 1213,
+      "text": "Transport envelope contains control characters"
+    },
+    {
+      "argument_types": [],
+      "code": 1214,
+      "text": "Transport envelope document is empty"
+    },
+    {
+      "argument_types": [],
+      "code": 1215,
+      "text": "Transport envelope exceeds the byte limit"
+    },
+    {
+      "argument_types": [],
+      "code": 1216,
+      "text": "Transport envelope has boundary whitespace"
+    },
+    {
+      "argument_types": [],
+      "code": 1217,
+      "text": "Transport key is unavailable"
+    },
+    {
+      "argument_types": [],
+      "code": 1218,
+      "text": "Transport response UUID does not match the expected route"
+    },
+    {
+      "argument_types": [],
+      "code": 1219,
+      "text": "Transport response format is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1220,
+      "text": "Transport response is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1221,
+      "text": "Transport response is shorter than its UUID route"
+    },
+    {
+      "argument_types": [],
+      "code": 1222,
+      "text": "Transport response route is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1223,
+      "text": "Transport test entropy length is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1224,
+      "text": "Transport wrapper exceeds the byte limit"
+    },
+    {
+      "argument_types": [],
+      "code": 1225,
+      "text": "Truncated binary v2 document"
+    },
+    {
+      "argument_types": [],
+      "code": 1226,
+      "text": "Unseen SOCKS batch fell outside the ordered recovery window"
+    },
+    {
+      "argument_types": [],
+      "code": 1227,
+      "text": "Unsorted or duplicate binary v2 map key"
+    },
+    {
+      "argument_types": [],
+      "code": 1228,
+      "text": "Unsupported Discord API version"
+    },
+    {
+      "argument_types": [],
+      "code": 1229,
+      "text": "Unsupported binary v2 tag"
+    },
+    {
+      "argument_types": [],
+      "code": 1230,
+      "text": "Unsupported binary v2 value"
+    },
+    {
+      "argument_types": [
+        "int"
+      ],
+      "code": 1231,
+      "text": "Unsupported command code {0}"
+    },
+    {
+      "argument_types": [],
+      "code": 1232,
+      "text": "invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1233,
+      "text": "socks must be a nonempty array"
+    },
+    {
+      "argument_types": [],
+      "code": 1234,
+      "text": "socks_ack must be nonempty"
+    },
+    {
+      "argument_types": [
+        "int"
+      ],
+      "code": 1235,
+      "text": "Discord GET failed with HTTP {0}"
+    },
+    {
+      "argument_types": [
+        "int"
+      ],
+      "code": 1236,
+      "text": "Discord recovery GET failed with HTTP {0}"
+    },
+    {
+      "argument_types": [],
+      "code": 1237,
+      "text": "Gateway readiness timed out"
+    },
+    {
+      "argument_types": [],
+      "code": 1238,
+      "text": "Transport emoji length is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1239,
+      "text": "Transport emoji token is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1240,
+      "text": "JSON transport wrapper contains duplicate fields"
+    },
+    {
+      "argument_types": [],
+      "code": 1241,
+      "text": "JSON transport wrapper has invalid boundaries"
+    },
+    {
+      "argument_types": [],
+      "code": 1242,
+      "text": "JSON transport wrapper is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1243,
+      "text": "ChaCha20 counter would wrap"
+    },
+    {
+      "argument_types": [],
+      "code": 1244,
+      "text": "ChaCha20 input is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1245,
+      "text": "Transport XOR input is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1246,
+      "text": "Transport envelope is invalid"
+    },
+    {
+      "argument_types": [],
+      "code": 1247,
+      "text": "Task failed"
+    }
+  ],
+  "version": 1
+}

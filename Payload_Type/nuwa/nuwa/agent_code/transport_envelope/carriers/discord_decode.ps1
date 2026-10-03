@@ -23,17 +23,11 @@ function ConvertFrom-NuwaDiscordMessage {
             return $null
         }
         $attachmentSizeText = [string]$attachmentSize
-        if ($attachmentSizeText -notmatch '^[0-9]+$') {
+        $parsedSize = ConvertTo-NuwaDiscordUnsignedDecimal -Value $attachmentSizeText
+        if ($null -eq $parsedSize -or $parsedSize -gt 2097152) {
             return $null
         }
-        try {
-            $declaredSize = [long]$attachmentSizeText
-        } catch {
-            return $null
-        }
-        if ($declaredSize -gt 2097152) {
-            return $null
-        }
+        [long]$declaredSize = $parsedSize
         $value = Get-NuwaDiscordAttachmentContent -Url ([string]$attachmentUrl) -DeclaredSize $declaredSize
     }
     if ([string]::IsNullOrWhiteSpace($value)) {

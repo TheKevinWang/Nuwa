@@ -1,0 +1,100 @@
+{
+  "actions": {
+    "checkin": 1,
+    "get_tasking": 2,
+    "post_response": 3,
+    "staging_rsa": 5,
+    "update_info": 4
+  },
+  "commands": {
+    "cd": 2,
+    "download": 9,
+    "exit": 5,
+    "hostname": 4,
+    "ls": 6,
+    "shell": 7,
+    "sleep": 1,
+    "socks": 10,
+    "upload": 8,
+    "whoami": 3
+  },
+  "fields": {
+    "action": 1,
+    "architecture": 20,
+    "c2_profile": 45,
+    "chunk_data": 30,
+    "chunk_num": 29,
+    "chunk_size": 31,
+    "command": 7,
+    "completed": 9,
+    "cwd": 21,
+    "data": 39,
+    "domain": 17,
+    "download": 27,
+    "exit": 40,
+    "exit_code": 42,
+    "file_id": 28,
+    "full_path": 33,
+    "host": 16,
+    "id": 5,
+    "interval": 43,
+    "ip": 13,
+    "jitter": 44,
+    "os": 14,
+    "parameters": 8,
+    "pid": 18,
+    "port": 38,
+    "process_response": 12,
+    "pub_key": 23,
+    "response_type": 41,
+    "responses": 3,
+    "server_id": 37,
+    "session_id": 24,
+    "session_key": 25,
+    "sleep_info": 22,
+    "socks": 34,
+    "socks_ack": 36,
+    "socks_batch_id": 35,
+    "status": 11,
+    "task_id": 6,
+    "tasking_size": 2,
+    "tasks": 4,
+    "timestamp": 46,
+    "total_chunks": 32,
+    "upload": 26,
+    "user": 15,
+    "user_output": 10,
+    "uuid": 19
+  },
+  "host_values": {
+    "Windows": 1,
+    "unknown": 4,
+    "unknown-host": 5,
+    "x64": 2,
+    "x86": 3
+  },
+  "parameter_fields": {
+    "action": 6,
+    "command": 2,
+    "file": 7,
+    "interval": 4,
+    "jitter": 5,
+    "path": 1,
+    "port": 9,
+    "raw_text": 8,
+    "remote_path": 3
+  },
+  "profiles": {
+    "discordx": 2,
+    "http": 1
+  },
+  "socks_actions": {
+    "start": 1,
+    "stop": 2
+  },
+  "statuses": {
+    "error": 2,
+    "success": 1
+  },
+  "version": 2
+}

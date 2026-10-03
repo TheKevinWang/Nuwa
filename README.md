@@ -20,18 +20,31 @@ XOR obfuscation, no protection, and custom envelope encoding.
 
 Use Nuwa only on systems you own or are explicitly authorized to test.
 
-## Current binary v1 contract
+## Current numeric binary v2 contract
 
-New Nuwa payloads use `codec_profile=binary-v1` and `use_base64=false` with
-`transport_envelope_format=binary-v1` on HTTP or DiscordX. The inner message
-is a canonical binary map; file chunks and SOCKS data are byte strings. The
-previous JSON, raw, decimal, emoji, and legacy Base64 inner formats are not
-accepted by this v1 contract. Install matching payload, translation, and C2
-profile revisions together. The current build choices and supported stacks
-are documented in [configuration](documentation-payload/nuwa/configuration.md).
+Nuwa payloads can now select `control_id_mode=default`, `custom`, or `random`.
+The default keeps the frozen v1/v2 inner formats. Custom and random modes use
+the per-payload binary v3 identifiers and require a matching Mythic server,
+payload container, and translation container installation. The [configuration
+guide](documentation-payload/nuwa/configuration.md#per-payload-control-identifiers)
+describes the uploaded JSON schema, limits, and callback lifecycle.
+New random payloads always use compact numeric IDs; older random payloads
+continue to derive their original wide mapping.
 
-The sections below describe the preceding protocol and remain for migration
-reference until the binary v1 live qualification is complete.
+New Nuwa payloads default to `codec_profile=binary-v2` and `use_base64=false`
+with `transport_envelope_format=binary-v1` on HTTP or DiscordX. The inner
+message uses canonical integer field IDs and numeric action, command, status,
+and fixed host codes. The translation container restores Mythic field names
+and task output; file chunks and SOCKS data remain byte strings. Its inbound
+reader also accepts binary v1 for older payloads. The builder still allows an
+explicit binary-v1 selection for migration tests. Install matching payload,
+translation, and C2 profile revisions together. The current build choices and
+supported stacks are documented in
+[configuration](documentation-payload/nuwa/configuration.md).
+
+The sections below describe the preceding JSON and binary-v1 designs and remain
+as migration reference. New v3 mappings have not been requalified with
+live callbacks in this update.
 
 ## Installation
 
@@ -39,7 +52,7 @@ Install the agent from the Mythic directory, using an absolute path to this
 directory:
 
 ```shell
-./mythic-cli install folder /absolute/path/to/Mythic_Agents/Nuwa -f
+./mythic-cli install folder /absolute/path/to/Nuwa -f
 ```
 
 The payload type and translation container are separate services. A healthy
@@ -116,7 +129,7 @@ The builder exposes four Nuwa-specific parameters:
 | Parameter | Values | Default | Effect |
 | --- | --- | --- | --- |
 | `codec_profile` | Registered codec names | `raw` | Selects the one inner message representation compiled into the payload; custom codecs extend the available choices. |
-| `debug_logging` | Boolean | `false` | Enables neutral `[Status]` host messages. Plaintext builds retain their existing diagnostics; protected builds never log message bodies or key material. |
+| `debug_logging` | Boolean | `false` | Selects error detail and debug code at build time. With `false`, failed tasks report `Task failed`; with `true`, they retain specific diagnostics and exception details, plus neutral `[Status]` host messages. No runtime debug switch. Protected builds never log message bodies or key material. |
 | `require_https` | Boolean | `false` | Rejects an HTTP build unless `callback_host` has an HTTPS scheme and nonempty host. It is a non-emitting build policy; Discord already uses HTTPS. |
 | `powershell_runtime` | `full-language`, `constrained-language` | `full-language` | Statically selects the optimized .NET-backed Full Language implementation or the CLM-compatible pure-PowerShell protection and staged-RSA implementation. It is build composition only and is not emitted as runtime configuration. |
 
@@ -144,7 +157,7 @@ fields, numeric ranges, proxy consistency, and these cross-option boundaries:
 - every protected outer mode requires one canonical Base64 32-byte key; an
   auto-materialized key is safely discarded when outer protection is `none`;
 - raw UUID framing rejects credentialed proxies and a conflicting
-  `X-Mythic-Body-Format` header.
+  `X-Agent-Body-Format` header.
 
 Recommended and release-qualified configurations are a smaller set than valid
 configurations. The validator does not reject a mechanically supported stack
@@ -232,16 +245,23 @@ key bytes enter the generated payload.
 
 The matching Mythic UI exposes an **Active listener** selector in Nuwa's C2
 configuration step. It inspects only running, online HTTP and Discord profiles
-through Mythic's authorized container-file action and copies the current
-listener-owned values into the normal C2 form. For Discord this includes the
-channel and credential plus `transport_envelope_format`, presentation,
-protection, key mode, key, and legacy Base64 switch. For HTTP it lists each
-configured internal port and copies the port and transport-envelope values.
+and lists healthy DiscordX logical listeners from the current operation's
+registry. Selecting DiscordX loads its named saved instance's nonsecret
+listener-owned settings; the bot token and transport key remain write-only
+and are resolved on the server during the build. The selected generation is
+checked again during the build, so a changed, disabled, or stale listener
+requires refreshing and selecting it again. For HTTP, Mythic's authorized
+container-file action lists each configured internal port and copies the port
+and transport-envelope values.
 HTTP callback hosts, redirector ports, URIs, timing, and other agent-owned
 values are deliberately left unchanged because they cannot be inferred from
-an internal listener. Selecting a listener changes only the local form until
-the payload is submitted; the named saved instance remains the durable source
-for recovery and reuse.
+an internal listener. DiscordX listener-owned settings are read-only while
+selected; payload timing and target proxy settings remain editable. Selecting
+a listener changes only the local form until the payload is submitted; the
+named saved instance remains the durable source for recovery and reuse. Use
+**Refresh listeners** after creating or changing a listener. A running DiscordX
+service with no saved listeners reports that state instead of offering an
+unconfigured listener.
 
 The Discord outer pipeline is `selected envelope serializer -> selected
 protection -> selected presentation`. The reverse path invokes exactly the configured
@@ -272,7 +292,7 @@ headers, timing, sizes, message-versus-attachment use, and other network
 metadata remain observable.
 
 Protected HTTP sends the presentation as a POST body and omits the clear
-`X-Mythic-Body-Format` selector. A raw request records `raw-v1` only inside the
+`X-Agent-Body-Format` selector. A raw request records `raw-v1` only inside the
 protected wrapper. A response can omit that field when Mythic's exact response
 body is not UUID-prefixed; Nuwa passes the recovered message unchanged to its
 existing response-framing code. Protected Discord uses final presented text
@@ -539,7 +559,7 @@ then strict UTF-8 and top-level JSON-object validation complete the parse.
 Legacy HTTP (`use_base64=true`, including the missing-value default) then sends
 `base64(ASCII UUID || wire message)`. Raw HTTP (`use_base64=false`) sends
 `ASCII UUID || wire message` directly and adds
-`X-Mythic-Body-Format: raw-v1`. The shared HTTP profile converts that selected
+`X-Agent-Body-Format: raw-v1`. The shared HTTP profile converts that selected
 raw request internally to the body Mythic core expects and removes the selector
 before proxying. Release review requires no case-insensitive occurrence of
 either `base64` or `b64` in a generated plaintext or static raw `.ps1` whose
@@ -754,35 +774,24 @@ extend to enforced application-control environments.
   decoded response JSON to the PowerShell host in backward-compatible
   plaintext builds. In a protected build, debug logging does not log plaintext
   or protected message bodies, HMAC values, or keys. Treat all debug payload
-  output as sensitive.
+  output as sensitive. Set it when creating a payload: an existing payload
+  cannot have debug output turned on or off at runtime.
+- Non-debug builds report caught task exceptions as `Task failed` with an
+  error status. Debug builds retain specific failure reasons and unexpected
+  exception details. Validation, retries, cleanup, and successful command
+  output (including downloaded file IDs) are preserved. Non-debug numeric
+  builds use one no-argument failure code for agent-owned thrown diagnostics.
+  A v3 payload embeds only diagnostic IDs referenced by its assembled agent;
+  the translation container retains the complete per-payload mapping.
 - Nuwa's `debug_logging` controls only agent-side output; Mythic server-side
   logging is separate. On Mythic builds without key-material redaction, keep
   the global `mythic_debug_agent_message` / `debug_agent_message` setting false
   when using protected profiles. Older server debug and staging-error paths may
-  serialize request fields or key-bearing records. This release was validated
-  with equivalent Mythic core redaction; apply that hardening before enabling
-  server-side logging in another deployment.
+  serialize request fields or key-bearing records. Use a Mythic core with
+  equivalent redaction before enabling server-side logging.
 - `shell` deliberately evaluates operator-supplied PowerShell. Nuwa does not
   add a sandbox beyond the token, language mode, application-control policy,
   and privileges of the hosting process.
 - `upload` overwrites an existing destination. File paths are resolved relative
   to Nuwa's logical working directory unless absolute or UNC.
   Message deletion is best-effort and is not a retention guarantee.
-
-## Development and validation
-
-Run focused unit tests from the workspace root:
-
-```shell
-python3 -m pytest Mythic_Agents/Nuwa/tests/unit -q
-```
-
-Run Nuwa's generated-artifact and mock-protocol gate with:
-
-```shell
-make -C Mythic_Agents/Nuwa gate-a
-```
-
-The checked-in implementation and tests are authoritative when this document
-and behavior diverge. `PUBLIC_RELEASE.md` describes the separate sanitized
-public-export workflow.

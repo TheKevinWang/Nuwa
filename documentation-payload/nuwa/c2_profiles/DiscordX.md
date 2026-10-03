@@ -9,6 +9,9 @@ weight = 22
 Nuwa uses the `discordx` C2 profile as a synchronous Discord REST poller. It
 embeds `discord_token`, `bot_channel`, `message_checks`, and
 `time_between_checks`; the token is sensitive payload material.
+Set `user_agent` to control the complete User-Agent header on Nuwa's Discord API
+requests. Its default is
+`DiscordBot (https://github.com/discord-net/Discord.Net, v3.20.1)`.
 
 ## Fixed channel contract
 

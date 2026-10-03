@@ -9,7 +9,7 @@ function Add-NuwaSocksOutboundRecord {
     )
 
     $queuedBytes = 0
-    foreach ($item in $Worker.Outbound) { $queuedBytes += ([byte[]]$item.data).Length }
+    foreach ($item in $Worker.Outbound) { $queuedBytes += ([byte[]]$item[$script:NuwaF_data]).Length }
     if ($Data.Length -gt 49152 -or $queuedBytes + $Data.Length -gt 524288 -or
         $Worker.Outbound.Count -ge 512) {
         throw 'SOCKS outbound queue is full'
@@ -18,12 +18,12 @@ function Add-NuwaSocksOutboundRecord {
         $Worker.FirstOutboundAt = [DateTimeOffset]::UtcNow
     }
     $Worker.LastOutboundAt = [DateTimeOffset]::UtcNow
-    $Worker.Outbound.Add(@{
-        server_id = [uint64]$ServerId
-        port = $Port
-        data = [byte[]]$Data
-        exit = $Exit
-    })
+    $record = @{}
+    $record[$script:NuwaF_server_id] = [uint64]$ServerId
+    $record[$script:NuwaF_port] = $Port
+    $record[$script:NuwaF_data] = [byte[]]$Data
+    $record[$script:NuwaF_exit] = $Exit
+    $Worker.Outbound.Add($record)
 }
 
 function Close-NuwaSocksConnection {
@@ -65,11 +65,11 @@ function Add-NuwaSocksServerRecord {
         [Parameter(Mandatory = $true)][object]$Record
     )
 
-    [uint32]$serverId = [uint32]$Record.server_id
+    [uint32]$serverId = [uint32]$Record[$script:NuwaF_server_id]
     $key = [string]$serverId
-    $port = [int]$Record.port
-    [byte[]]$data = if ($null -ne $Record.data) { [byte[]]$Record.data } else { [byte[]]@() }
-    $remoteExit = ($Record.exit -eq $true)
+    $port = [int]$Record[$script:NuwaF_port]
+    [byte[]]$data = if ($null -ne $Record[$script:NuwaF_data]) { [byte[]]$Record[$script:NuwaF_data] } else { [byte[]]@() }
+    $remoteExit = ($Record[$script:NuwaF_exit] -eq $true)
     if ($Worker.Connections.ContainsKey($key)) {
         $connection = $Worker.Connections[$key]
         if ($port -ne 0 -and $port -ne $connection.Port) {
@@ -235,10 +235,9 @@ function ConvertFrom-NuwaSocksServerFrame {
     [byte[]]$inner = [byte[]]$frame[36..($frame.Length - 1)]
     if ($script:NuwaConfig.ProtectionProfile -and
         [string]$script:NuwaConfig.ProtectionProfile -ne 'none') {
-        $context = Get-NuwaCodecContext -Direction 'inbound' -Uuid $callbackUuid -MessageType 'post_response'
-        $inner = [byte[]](Unprotect-NuwaBytes -Bytes $inner -Context $context)
+        $inner = [byte[]](Unprotect-NuwaBytes -Bytes $inner -Context @{})
     }
-    return ConvertFrom-NuwaBinaryV1Bytes -Bytes $inner
+    return ConvertFrom-NuwaBinaryV2Bytes -Bytes $inner
 }
 
 function Invoke-NuwaSocksInboundMessage {
@@ -269,10 +268,10 @@ function Invoke-NuwaSocksInboundMessage {
         return
     }
     $body = ConvertFrom-NuwaSocksServerFrame -Parsed $parsed
-    if ($null -eq $body -or [string]$body.action -ne 'post_response') { return }
+    if ($null -eq $body -or [int]$body[$script:NuwaF_action] -ne $script:NuwaA_post_response) { return }
 
-    if ($body.ContainsKey('socks_ack')) {
-        foreach ($ack in @($body.socks_ack)) {
+    if ($body.ContainsKey($script:NuwaF_socks_ack)) {
+        foreach ($ack in @($body[$script:NuwaF_socks_ack])) {
             if ($ack -isnot [byte[]] -or $ack.Length -ne 16) { throw 'Malformed SOCKS acknowledgment' }
             $ackHex = [BitConverter]::ToString([byte[]]$ack).Replace('-', '')
             if ($null -ne $Worker.Pending -and $Worker.Pending.Id -eq $ackHex) {
@@ -281,8 +280,8 @@ function Invoke-NuwaSocksInboundMessage {
         }
     }
 
-    if ($null -ne $body.socks_batch_id) {
-        [byte[]]$batchId = [byte[]]$body.socks_batch_id
+    if ($null -ne $body[$script:NuwaF_socks_batch_id]) {
+        [byte[]]$batchId = [byte[]]$body[$script:NuwaF_socks_batch_id]
         if ($batchId.Length -ne 16) { throw 'Malformed SOCKS batch ID' }
         $batchHex = [BitConverter]::ToString($batchId).Replace('-', '')
         if ($Worker.FailedBatchIds.Contains($batchHex)) { return }
@@ -290,13 +289,13 @@ function Invoke-NuwaSocksInboundMessage {
             if ($numericMessageId -lt $Worker.LastMessageId) {
                 throw 'Unseen SOCKS batch fell outside the ordered recovery window'
             }
-            $records = @($body.socks)
+            $records = @($body[$script:NuwaF_socks])
             if ($records.Count -eq 0 -or $records.Count -gt 64) { throw 'SOCKS batch record count is invalid' }
             $total = 0
             foreach ($record in $records) {
-                $total += ([byte[]]$record.data).Length
+                $total += ([byte[]]$record[$script:NuwaF_data]).Length
                 if ($total -gt 49152) { throw 'SOCKS batch exceeds data ceiling' }
-                $port = [int]$record.port
+                $port = [int]$record[$script:NuwaF_port]
                 if ($port -ne 0 -and -not $Worker.Shared.Ports.ContainsKey($port)) {
                     throw 'SOCKS batch names an inactive listener port'
                 }
@@ -310,7 +309,7 @@ function Invoke-NuwaSocksInboundMessage {
             } catch {
                 [void]$Worker.FailedBatchIds.Add($batchHex)
                 foreach ($record in $records) {
-                    Close-NuwaSocksConnection -Worker $Worker -ServerId ([uint32]$record.server_id)
+                    Close-NuwaSocksConnection -Worker $Worker -ServerId ([uint32]$record[$script:NuwaF_server_id])
                 }
                 Write-NuwaDebug ('SOCKS batch retained after affected connections closed: {0}' -f $_.Exception.Message)
                 return

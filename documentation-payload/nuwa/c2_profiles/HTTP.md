@@ -13,7 +13,9 @@ The endpoint is formed from `callback_host`, `callback_port`, and `post_uri`.
 
 `use_base64=true` (including an omitted value) uses the historical Base64
 envelope: `Base64(ASCII UUID || wire message)`. `use_base64=false` uses raw-v1:
-`ASCII UUID || wire message`, with `X-Mythic-Body-Format: raw-v1`. The two
+`ASCII UUID || wire message`, with `X-Agent-Body-Format: raw-v1`. The HTTP
+profile also accepts the previous `X-Mythic-Body-Format` selector during the
+transition and rejects requests that provide conflicting selectors. The two
 choices are outer framing and are independent of the selected inner codec and
 `AESPSK` protection.
 

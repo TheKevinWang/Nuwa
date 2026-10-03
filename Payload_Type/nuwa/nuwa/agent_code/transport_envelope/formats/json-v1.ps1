@@ -1,6 +1,6 @@
 function Test-NuwaJsonV1Uuid {
     param([string]$Value)
-    return $Value -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    return (Test-NuwaCanonicalUuid -Value $Value)
 }
 
 function Test-NuwaJsonV1Wrapper {
